@@ -125,7 +125,11 @@ def desktop_version():
 # 服务端**按这些值过滤设备定向活动**：派生的假身份不会报错，但活动列表里
 # 会静默少掉"每日领取 100 Credits"这类条目（实测：换用原生身份后立刻出现
 # CLAIMABLE 活动）。因此网关优先调用同一个官方二进制取真值，失败才回退派生值。
-NATIVE_IDENTITY_TTL = 6 * 3600
+# 原生身份缓存：**身份会轮换**（实测十几分钟内 token/type/code 就变了），
+# 所以只做短缓存，并在"列表显示活动被过滤"时强制刷新重试一次。
+# 注意：身份是**机器级**的（不同账号/不存在的账号 id 都返回同一份），
+# 因此按区域缓存即可，同一台机器上的多个账号共用是正确的。
+NATIVE_IDENTITY_TTL = 120
 _native_exe_cache = {}
 _native_ident_cache = {}
 
@@ -193,15 +197,18 @@ def runtime_info_exe(realm):
     return found
 
 
-def native_machine_identity(realm, account_id):
+def native_machine_identity(realm, account_id, force=False):
     """调用官方原生桥取真实机器身份；任何失败返回 {}（调用方回退派生值）。
 
-    结果按 (realm) 缓存 NATIVE_IDENTITY_TTL 秒——机器身份在一台机器上稳定。
+    身份是**机器级**的（实测不同 account id 返回同一份），按区域短缓存
+    NATIVE_IDENTITY_TTL 秒——它会随时间轮换，长缓存会拿到过期身份导致活动
+    列表被过滤；force=True 时跳过缓存重新取值。
     """
     now = time.time()
-    hit = _native_ident_cache.get(realm)
-    if hit and now - hit[0] < NATIVE_IDENTITY_TTL:
-        return hit[1]
+    if not force:
+        hit = _native_ident_cache.get(realm)
+        if hit and now - hit[0] < NATIVE_IDENTITY_TTL:
+            return hit[1]
     ident = {}
     exe = runtime_info_exe(realm)
     if exe and account_id:
@@ -825,23 +832,15 @@ class Account(object):
         return {"ok": True, "msg": "签到成功 +%d 积分" % reward,
                 "reward_credits": reward}
 
-    def campaigns(self):
-        """GET /sash/api/v1/me/campaigns -> 官方活动平台状态（双区域通用）。
+    def _campaigns_get(self):
+        """一次活动列表请求（桌面端头 → 401/403 回退普通头）。
 
-        官方把"每日领取 100 Credits"等限时活动搬到了 campaign 平台：
-        **必须用桌面端请求头**（`desktop_headers()`：Cosy-ClientType 10 +
-        机器头 + UA Qoder），否则服务端不报错但返回空列表——这正是此前
-        "看过活动页却领不到 / 网关显示无活动"的根因（对照官方桌面端
-        0.4.3 的 main.log：同一账号同一路径，带桌面头时 `claimable=true`）。
-
-        返回 {ok, available, show_campaign, claimable, campaign_url, campaigns}，
-        每条活动含 action_type / claim_status / benefit（Credits 数量）/ end_at。
+        返回 (payload|None, http_code, error_str)；payload 为服务端 JSON。
         """
-        cfg = get_realm_config(self.realm)
-        url = cfg["openapi"] + PATH_CAMPAIGNS
+        url = get_realm_config(self.realm)["openapi"] + PATH_CAMPAIGNS
         try:
-            q = http_json(url, method="GET", headers=self.desktop_headers(),
-                          timeout=15, retries=1)
+            return http_json(url, method="GET", headers=self.desktop_headers(),
+                             timeout=15, retries=1), 200, ""
         except urllib.error.HTTPError as exc:
             try:
                 body = exc.read().decode("utf-8", "replace")
@@ -850,17 +849,41 @@ class Account(object):
             # 桌面端头被拒（401/403）时回退普通头，至少保留"能不能看到"的信息
             if exc.code in (401, 403):
                 try:
-                    q = http_json(url, method="GET", headers=self.headers(),
-                                  timeout=15, retries=1)
+                    return http_json(url, method="GET", headers=self.headers(),
+                                     timeout=15, retries=1), 200, ""
+                except urllib.error.HTTPError as exc2:
+                    return None, exc2.code, ("HTTP %d (desktop) / HTTP %d (plain)"
+                                             % (exc.code, exc2.code))
                 except Exception as exc2:
-                    return {"ok": False, "available": True,
-                            "error": "HTTP %d (desktop) / %s (plain)"
-                                     % (exc.code, exc2)}
-            else:
-                return {"ok": False, "available": exc.code not in (404, 405, 410),
-                        "error": "HTTP %d %s" % (exc.code, body[:160])}
+                    return None, exc.code, "HTTP %d (desktop) / %s (plain)" % (exc.code, exc2)
+            return None, exc.code, "HTTP %d %s" % (exc.code, body[:160])
         except Exception as exc:
-            return {"ok": False, "available": True, "error": str(exc)}
+            return None, 0, str(exc)
+
+    def campaigns(self):
+        """GET /sash/api/v1/me/campaigns -> 官方活动平台状态（双区域通用）。
+
+        官方把"每日领取 100 Credits"等限时活动搬到了 campaign 平台，取列表要
+        **两层都对**：① 桌面端请求头（`desktop_headers()`）；② 服务端认可的
+        **真实机器身份**（原生桥取，见 `native_machine_identity`）。两者任一
+        不对都表现为 HTTP 200 + 列表里少活动（不报错），这正是"领不到"的根因。
+
+        机器身份会轮换：若本次 `showCampaign=false`（通常意味着身份被判定为
+        非官方客户端），强制刷新一次身份并重试，避免缓存过期导致整天领不到。
+
+        返回 {ok, available, show_campaign, claimable, campaign_url, campaigns,
+              identity}，每条活动含 action_type / claim_status / benefit / end_at。
+        """
+        q, code, err = self._campaigns_get()
+        if isinstance(q, dict) and not q.get("showCampaign") \
+                and getattr(self, "machine_identity_source", "") == "native":
+            native_machine_identity(self.realm, self.uid, force=True)
+            q2, code2, err2 = self._campaigns_get()
+            if isinstance(q2, dict) and q2.get("showCampaign"):
+                q, code, err = q2, code2, err2
+        if not isinstance(q, dict):
+            return {"ok": False, "available": code not in (404, 405, 410),
+                    "error": err or ("HTTP %d" % code)}
         items = []
         raw = q.get("campaigns")
         for c in (raw if isinstance(raw, list) else []):
@@ -952,10 +975,14 @@ class Account(object):
     def campaign_checkin(self, gap=0.5):
         """活动平台签到：领取所有 CLAIMABLE 的 Credits 活动（每日 100 等）。
 
+        先强制刷新原生机器身份（身份会轮换，缓存过期会让列表被过滤 → 漏领），
+        再列活动、逐个领取。多账户场景下每个账号独立走这一遍。
+
         返回 {ok, claimed:[...], already:[...], earned, message, campaigns}
           - 已是 CLAIMED 的活动计入 already（"今日已领取"）
           - 无可领取项且没有任何活动 -> ok=True + message 说明
         """
+        native_machine_identity(self.realm, self.uid, force=True)
         st = self.campaigns()
         if not st.get("ok"):
             return {"ok": False, "error": st.get("error") or "campaigns 查询失败",

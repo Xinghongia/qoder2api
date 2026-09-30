@@ -1774,6 +1774,77 @@ check("replayed claim counted as already (no phantom credits)",
       _res21["earned"] == 0 and len(_res21["already"]) == 1
       and not _res21["claimed"], _res21.get("message"))
 
+# --- 20.5 身份轮换：show=false 时强制刷新身份并重试一次 ---
+_orig_get = A.Account._campaigns_get
+_orig_native = A.native_machine_identity
+_seq = []
+
+
+def _stub_get(self):
+    _seq.append(1)
+    if len(_seq) == 1:
+        return {"showCampaign": False, "claimable": False, "campaigns": []}, 200, ""
+    return {"showCampaign": True, "claimable": True, "campaignUrl": "u",
+            "campaigns": [{"campaignId": "cx", "campaignKey": "act-x",
+                           "actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE",
+                           "startAt": 0, "endAt": 0,
+                           "benefit": {"kind": "CREDITS", "amount": 100},
+                           "placements": []}]}, 200, ""
+
+
+_forced = []
+
+
+def _stub_native(realm, account_id, force=False):
+    if force:
+        _forced.append(account_id)
+    return {"machineToken": "t", "machineType": "ty", "machineCode": "c",
+            "source": "runtime-info"}
+
+
+A.Account._campaigns_get = _stub_get
+A.native_machine_identity = _stub_native
+_acc25 = A.Account({"uid": "cp25", "realm": "cn", "accessToken": "dt-x"})
+_acc25.machine_identity_source = "native"
+try:
+    _st25 = _acc25.campaigns()
+finally:
+    A.Account._campaigns_get = _orig_get
+    A.native_machine_identity = _orig_native
+check("filtered list (show=false) triggers one forced identity refresh + retry",
+      len(_seq) == 2 and _forced == ["cp25"]
+      and _st25["show_campaign"] is True and _st25["claimable"] is True,
+      (len(_seq), _forced))
+check("retry keeps the second (populated) payload",
+      len(_st25.get("campaigns") or []) == 1
+      and _st25["campaigns"][0]["campaign_key"] == "act-x")
+
+# --- 20.6 campaign_checkin 先强制刷新身份（轮换后不漏领） ---
+_orig_get2 = A.Account._campaigns_get
+_orig_native2 = A.native_machine_identity
+_forced2 = []
+
+
+def _stub_native2(realm, account_id, force=False):
+    if force:
+        _forced2.append(account_id)
+    return {"machineToken": "t", "machineType": "ty", "machineCode": "c",
+            "source": "runtime-info"}
+
+
+A.Account._campaigns_get = lambda self: (
+    {"showCampaign": True, "claimable": False, "campaignUrl": "", "campaigns": []},
+    200, "")
+A.native_machine_identity = _stub_native2
+A.Account.claim_campaign = _orig_claim
+try:
+    A.Account({"uid": "cp26", "realm": "cn", "accessToken": "dt-x"}).campaign_checkin(gap=0)
+finally:
+    A.Account._campaigns_get = _orig_get2
+    A.native_machine_identity = _orig_native2
+check("campaign_checkin force-refreshes the machine identity first",
+      _forced2 == ["cp26"], _forced2)
+
 # --- 20.4 思考档位归一化（官方词表因模型而异，未命中会被上游静默忽略） ---
 _meta_df = next(m for m in C.models_for_realm("cn") if m["key"] == "dfmodel")
 _meta_qf = next(m for m in C.models_for_realm("cn") if m["key"] == "qfmodel")
