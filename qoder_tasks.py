@@ -170,7 +170,7 @@ def _campaign_task_row(account, camp, summary):
         return {
             "task_code": "daily_checkin",
             "name": "每日签到（每日领取 Credits）",
-            "description": "可领取 %s Credits（%s）—— 点「一键签到」自动领取"
+            "description": "可领取 %s Credits（%s）—— 点「一键签到」或该账号行的「签到」直接领取"
                            % (amount or "-", keys),
             "jump_url": jump,
             "status": "completed",

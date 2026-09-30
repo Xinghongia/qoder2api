@@ -399,7 +399,7 @@ a:hover{text-decoration:underline}
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
       <div>
         <h2 style="margin:0">签到与福利中心</h2>
-        <div style="font-size:12px;color:var(--dim)">全自动每日签到领取积分 (+100/天)，Pro 福利包一次性 +1800；限时活动（每日领取 100 Credits 等）在官方客户端内领取，此处呈现真实状态</div>
+        <div style="font-size:12px;color:var(--dim)">全自动每日签到领取积分 (+100/天)，含官方活动平台的「每日 100 Credits」直达领取；Pro 福利包一次性 +1800</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <select id="growthAcctSelect" onchange="switchGrowthAccount(this.value)" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg);font-family:inherit">
@@ -1320,9 +1320,22 @@ async function doCheckin(btn){
       const summary = res.map(x => (x.nickname||x.uid.slice(0,6)) + ": " + (x.ok ? "签到成功" : (x.error||x.msg))).join("；");
       toast("每日签到: " + summary, res.some(x => x.ok) ? "ok" : "warn");
     }
-    await initRealm(); loadAccounts(); loadModels();
+    // 不调用 initRealm()：它会把 VIEW_REALM 重置为网关当前出口所在区域，
+    // 导致签到后账号列表被"跳"到另一个区的账号（国际/国内）。
+    await loadAccounts(); loadModels();
   }catch(e){ toast("签到失败: " + e.message, "bad"); }
   finally { btn.disabled = false; btn.textContent = ot; }
+}
+async function checkinOne(uid, btn){
+  if(btn){ btn.disabled = true; btn.textContent = '签到中...'; }
+  try {
+    const r = await postJSON("/accounts/checkin", {uid: uid});
+    const x = (r.results || [])[0];
+    if(!x) toast("未找到该账号", "warn");
+    else toast((x.nickname || uid.slice(0,6)) + ": " + (x.ok ? (x.msg || "签到成功") : (x.error || x.msg || "签到失败")), x.ok ? "ok" : "bad");
+    await loadAccounts();   // 原地刷新当前视图，不切换区域
+  }catch(e){ toast("签到失败: " + e.message, "bad"); }
+  finally { if(btn){ btn.disabled = false; btn.textContent = '签到'; } }
 }
 
 const fmt = n => (n ?? 0).toLocaleString('en-US');
@@ -1467,6 +1480,7 @@ function accountRow(a){
     + '<td style="text-align:center;white-space:nowrap;vertical-align:middle">'
     + '<div style="display:flex;flex-direction:column;gap:5px;align-items:center;justify-content:center">'
     +   '<div style="display:flex;gap:4px;justify-content:center">'
+    +     '<button class="sec mini" onclick="checkinOne(&quot;' + uidAttr + '&quot;, this)">签到</button>'
     +     '<button class="sec mini" onclick="toggleAccount(&quot;' + uidAttr + '&quot;,' + (!a.enabled) + ', this)">' + (a.enabled ? '停用' : '启用') + '</button>'
     +     '<button class="sec mini" onclick="testAccount(&quot;' + uidAttr + '&quot;, this)">测试</button>'
     +     '<button class="sec mini" onclick="refreshOne(&quot;' + uidAttr + '&quot;, this)">刷新</button>'
@@ -1509,7 +1523,7 @@ function renderAccounts(){
     + '<th style="text-align:right;width:70px">请求</th>'
     + '<th style="text-align:right;width:88px">总 token</th>'
     + '<th style="text-align:right;width:80px">缓存</th>'
-    + '<th style="text-align:center;width:150px">操作</th>'
+    + '<th style="text-align:center;width:184px">操作</th>'
     + '</tr></thead><tbody>' + list.map(accountRow).join('') + '</tbody></table></div>'
     + '<div class="legend"><span>多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个</span></div>';
 }

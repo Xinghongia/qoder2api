@@ -993,6 +993,107 @@ _A.http_json = _orig_hj
 check("campaigns 404 -> ok False + available False (no crash)",
       camp404["ok"] is False and camp404["available"] is False, camp404)
 
+# --- 「签到」按钮（/accounts/checkin -> checkin()）旧接口不可用时改走活动平台 ---
+_REAL_CLAIM_BODY = {
+    "grantId": "g-1", "status": "CLAIMED", "replayed": False,
+    "benefit": {"kind": "CREDITS", "amount": 100,
+                "validity": {"mode": "RELATIVE_DAYS", "days": 30}},
+    "campaignId": "c-1", "campaignKey": "act-daily",
+    "expiresAt": "2026-10-30T12:49:22.692712Z",
+}
+
+
+def _credit_campaigns_payload(status="CLAIMABLE", action="CLAIM_BENEFIT"):
+    return {"uid": "cc-1", "showCampaign": True,
+            "claimable": status == "CLAIMABLE",
+            "campaignUrl": "https://qoder.com/growth-page/activity-iframe",
+            "campaigns": [{"campaignId": "c-1", "campaignKey": "act-daily",
+                           "actionType": action, "claimStatus": status,
+                           "startAt": 0, "endAt": 0,
+                           "benefit": {"kind": "CREDITS", "amount": 100},
+                           "placements": []}]}
+
+
+_claim_posts_fb = []
+
+
+def fake_intl_claim_flow(url, **kw):
+    if "daily-check-in/status" in url:
+        raise _ue2.HTTPError(url, 404, "nf", {},
+                             _io2.BytesIO(b'{"errorCode":"NotFound"}'))
+    if url.endswith("/campaigns"):
+        return _credit_campaigns_payload()
+    if "/campaigns/c-1/claim" in url:
+        _claim_posts_fb.append(kw.get("method"))
+        return _REAL_CLAIM_BODY
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_intl_claim_flow
+_acc_fb = _A.Account({"uid": "fb-1", "realm": "intl", "accessToken": "dt-x"})
+_res_fb = _acc_fb.checkin()
+_A.http_json = _orig_hj
+check("checkin() falls back to campaign platform when legacy 404s",
+      _res_fb.get("ok") and _res_fb.get("campaign")
+      and _res_fb.get("reward_credits") == 100, _res_fb)
+check("fallback issued exactly one claim POST",
+      _claim_posts_fb == ["POST"], _claim_posts_fb)
+
+
+def fake_cn_disabled_flow(url, **kw):
+    if "daily-check-in/status" in url:
+        return {"campaignKey": "cn_daily_check_in_legacy",
+                "status": "DISABLED", "rewardCredits": 100}
+    if url.endswith("/campaigns"):
+        return _credit_campaigns_payload()
+    if "/campaigns/c-1/claim" in url:
+        return dict(_REAL_CLAIM_BODY, replayed=True)
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_cn_disabled_flow
+_acc_fb2 = _A.Account({"uid": "fb-2", "realm": "cn", "accessToken": "dt-x"})
+_res_fb2 = _acc_fb2.checkin()
+_A.http_json = _orig_hj
+check("DISABLED legacy also falls back to campaign (replay -> already)",
+      _res_fb2.get("ok") and _res_fb2.get("campaign")
+      and _res_fb2.get("already"), _res_fb2)
+
+
+def fake_view_only(url, **kw):
+    if "daily-check-in/status" in url:
+        raise _ue2.HTTPError(url, 404, "nf", {}, _io2.BytesIO(b""))
+    if url.endswith("/campaigns"):
+        return _credit_campaigns_payload(action="VIEW_DETAILS")
+    raise AssertionError("VIEW_DETAILS promo must not be claimed: %s" % url)
+
+
+_A.http_json = fake_view_only
+_acc_fb3 = _A.Account({"uid": "fb-3", "realm": "intl", "accessToken": "dt-x"})
+_res_fb3 = _acc_fb3.checkin()
+_A.http_json = _orig_hj
+check("VIEW_DETAILS promo never auto-claimed by the button path",
+      _res_fb3.get("ok") and _res_fb3.get("unavailable")
+      and not _res_fb3.get("campaign"), _res_fb3)
+
+
+def fake_no_campaigns(url, **kw):
+    if "daily-check-in/status" in url:
+        raise _ue2.HTTPError(url, 404, "nf", {}, _io2.BytesIO(b""))
+    if url.endswith("/campaigns"):
+        return {"uid": "cc-9", "showCampaign": False, "claimable": False,
+                "campaignUrl": "", "campaigns": []}
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_no_campaigns
+_acc_fb4 = _A.Account({"uid": "fb-4", "realm": "intl", "accessToken": "dt-x"})
+_res_fb4 = _acc_fb4.checkin()
+_A.http_json = _orig_hj
+check("no campaigns -> legacy reason still surfaced (nothing silently claimed)",
+      _res_fb4.get("ok") and _res_fb4.get("unavailable")
+      and not _res_fb4.get("campaign"), _res_fb4)
+
 print()
 print("[6] request body construction")
 body = P.build_qoder_body({

@@ -772,6 +772,10 @@ class Account(object):
         ok, st = self.checkin_status()
         if not ok:
             if st.get("unavailable"):
+                # 旧接口不存在（如国际版 404）：改走活动平台直领
+                res = self._campaign_checkin_result()
+                if res is not None:
+                    return res
                 return {"ok": True, "unavailable": True,
                         "reason": st.get("reason"),
                         "msg": "本区域未开放 /sash/api/v1/me/daily-check-in 接口"
@@ -782,8 +786,11 @@ class Account(object):
             return {"ok": True, "already": True, "msg": "今日已签到",
                     "streak_days": st["streak_days"], "reward_credits": st["reward_credits"]}
         if not st["active"]:
-            # CLAIMABLE / CLAIMED 之外的状态（如 DISABLED：活动批次下线），
-            # 不发起无意义的 claim，按"活动未开放"成功跳过。
+            # CLAIMABLE / CLAIMED 之外的状态（如 DISABLED：旧批次下线）：
+            # 不硬领旧接口，改走活动平台直领（"每日领取 100 Credits"等新活动）。
+            res = self._campaign_checkin_result()
+            if res is not None:
+                return res
             return {"ok": True, "disabled": True, "status": st.get("status"),
                     "msg": "官方签到活动未开放 (status=%s)" % (st.get("status") or "?")}
         cfg = get_realm_config(self.realm)
@@ -990,6 +997,26 @@ class Account(object):
                 "earned": earned, "message": msg, "campaigns": st["campaigns"],
                 "errors": errors}
 
+    def _campaign_checkin_result(self):
+        """旧签到接口不可用/停用时改走活动平台（checkin() 的兜底分支）。
+
+        看板「每日签到」/账号行「签到」按钮走的都是 /accounts/checkin →
+        checkin()；官方现行机制在活动平台，这里把 campaign_checkin() 的
+        结果翻译成 checkin() 的返回契约。当前账号没有可领/可报的活动时返回
+        None，调用方回退到旧接口的说明文案。
+        """
+        camp = self.campaign_checkin()
+        if camp.get("claimed"):
+            return {"ok": True, "campaign": True,
+                    "reward_credits": int(camp.get("earned") or 0),
+                    "msg": camp.get("message")}
+        if camp.get("already"):
+            return {"ok": True, "campaign": True, "already": True,
+                    "msg": camp.get("message")}
+        if camp.get("errors"):
+            return {"ok": False, "campaign": True,
+                    "error": "；".join(camp.get("errors") or [])[:200]}
+        return None
 
     def _stamp_checkin(self):
         self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
