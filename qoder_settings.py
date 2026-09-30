@@ -262,6 +262,32 @@ def set_auth_disabled(accounts_dir, disabled):
         save(accounts_dir, data)
 
 
+# ----------------------------------------------------------- outbound proxy
+# Panel-managed proxy mode for every outbound request (see qoder_net.py).
+# "system" follows the OS settings; "manual" uses proxy_url; "direct" never
+# proxies. Environment variables QD_PROXY_MODE / QD_PROXY_URL still win.
+
+PROXY_MODES = ("system", "manual", "direct")
+
+
+def proxy_config(accounts_dir):
+    """Return {"mode": system|manual|direct, "url": str} (defaults to system)."""
+    data = load(accounts_dir)
+    mode = str(data.get("proxy_mode") or "system").strip().lower()
+    if mode not in PROXY_MODES:
+        mode = "system"
+    return {"mode": mode, "url": str(data.get("proxy_url") or "").strip()}
+
+
+def set_proxy_config(accounts_dir, mode, url):
+    with _lock:
+        data = load(accounts_dir)
+        mode = str(mode or "system").strip().lower()
+        data["proxy_mode"] = mode if mode in PROXY_MODES else "system"
+        data["proxy_url"] = str(url or "").strip() if data["proxy_mode"] == "manual" else ""
+        save(accounts_dir, data)
+
+
 class PanelSessions(object):
     """In-memory bearer tokens handed out after a successful panel login.
 

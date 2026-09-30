@@ -40,6 +40,12 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import qoder_catalog as C
+import qoder_net
+try:                       # 面板里选的代理模式对 --base 为远端时同样生效
+    import qoder_accounts as _qa
+    qoder_net.load_from_settings(_qa.ACCOUNTS_DIR)
+except Exception:
+    pass
 
 PASS = FAIL = 0
 FAILURES = []
@@ -126,7 +132,7 @@ def _validate_fetch_url(url, allow_loopback):
 def fetch_models(base, realm):
     url = _validate_fetch_url(f"{base}/v1/models?realm={realm}",
                               allow_loopback=True)
-    with urllib.request.urlopen(url, timeout=30) as resp:
+    with qoder_net.urlopen(url, timeout=30) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     return payload.get("data") or []
 

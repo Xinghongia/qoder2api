@@ -29,6 +29,7 @@ import uuid
 
 from qoder_fingerprint import (derive_id, generate_request_id,
                                derive_machine_token, derive_machine_type)
+import qoder_net
 
 # ---------------------------------------------------------------------------
 # 区域常量（逆向自官方桌面/CLI 客户端）
@@ -383,7 +384,7 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
             headers=headers or {},
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with qoder_net.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last = exc
@@ -1518,7 +1519,7 @@ class AccountPool(object):
             "User-Agent": "QoderWork",
         })
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with qoder_net.urlopen(req, timeout=20) as resp:
                 raw = resp.read().decode("utf-8")
                 status = resp.status
         except urllib.error.HTTPError as exc:
@@ -1554,7 +1555,7 @@ class AccountPool(object):
                 "User-Agent": CLIENT_UA,
                 "Authorization": "Bearer " + token,
             })
-            with urllib.request.urlopen(req_ui, timeout=15) as resp_ui:
+            with qoder_net.urlopen(req_ui, timeout=15) as resp_ui:
                 ui = json.loads(resp_ui.read().decode("utf-8"))
             uid = str(ui.get("id") or uid)
             nickname = str(ui.get("name") or "")

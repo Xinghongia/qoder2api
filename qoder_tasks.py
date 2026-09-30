@@ -230,9 +230,28 @@ def fetch_tasks_view(pool, realm=None, uid=None):
         target = pool.get(uid)
         if target and target in eligible:
             acc = target
+    batch_mode = acc is None
     if acc is None:
         acc = eligible[0]
     tasks, summary = fetch_task_view(acc)
+    if batch_mode:
+        # 「全部账号 (批量)」视图：余额卡片显示**各账号合计**（此前用的是
+        # 首个账号的快照，账号一多就对不上；单账号视图保持原样）。
+        breakdown, total = [], 0
+        for a in eligible:
+            if not a.credits:
+                try:
+                    a.fetch_credits()
+                except Exception:
+                    pass
+            remain = int((a.credits or {}).get("remain") or 0)
+            total += remain
+            breakdown.append({"uid": a.uid,
+                              "nickname": a.nickname or a.uid[:8],
+                              "realm": a.realm,
+                              "remain": remain})
+        summary["energy"] = total
+        summary["energy_breakdown"] = breakdown
     acct_list = [{"uid": a.uid, "nickname": a.nickname or a.uid[:8],
                   "realm": a.realm} for a in eligible]
     return {"tasks": tasks, "summary": summary, "account": acc.public(),

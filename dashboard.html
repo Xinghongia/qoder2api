@@ -523,6 +523,28 @@ a:hover{text-decoration:underline}
     </section>
 
     <section>
+      <h2>网络代理 <em id="setProxyState"></em></h2>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+        网关所有出站请求（模型推理、活动领取、账号接口、模型清单）统一走这里的选择；本机回环地址始终直连。
+        环境变量 <span class="mono">QD_PROXY_MODE</span> / <span class="mono">QD_PROXY_URL</span> 存在时优先级更高。
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="radio" name="proxyMode" value="system"> 跟随系统代理</label>
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="radio" name="proxyMode" value="manual"> 手动指定代理</label>
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer"><input type="radio" name="proxyMode" value="direct"> 直连（不使用代理）</label>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:240px">
+          <div style="font-size:12px;color:var(--dim);margin-bottom:4px">代理地址（仅手动模式使用）</div>
+          <input id="setProxyUrl" placeholder="http://127.0.0.1:7897"
+                 style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+        </div>
+        <button onclick="saveProxyConfig(this)">保存代理设置</button>
+      </div>
+      <div id="setProxyEffective" style="margin-top:10px;font-size:12px;color:var(--dim)"></div>
+    </section>
+
+    <section>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
@@ -1152,7 +1174,14 @@ async function loadGrowthTasks(){
     const elStk = document.getElementById("stkDays");
     if(elStk) elStk.textContent = streak + ' 天';
     const elNrg = document.getElementById("nrgBalance");
-    if(elNrg) elNrg.textContent = energy;
+    if(elNrg){
+      elNrg.textContent = energy;
+      // 全部账号(批量)时后端给的是各账号合计，悬停显示明细
+      const bd = sum.energy_breakdown;
+      elNrg.title = (Array.isArray(bd) && bd.length)
+        ? ('各账号余额合计：' + bd.map(x => (x.nickname || x.uid.slice(0,6)) + ' ' + fmt(x.remain)).join(' ｜ '))
+        : '';
+    }
 
     const elCat = document.getElementById("catState");
     const elCatDesc = document.getElementById("catDesc");
@@ -2415,6 +2444,20 @@ async function loadSettings(showToast){
     window.API_KEY_ROWS = API_KEY_ROWS;
     renderKeyRows();
     updateUI();
+    // 网络代理（三档：跟随系统 / 手动 / 直连）
+    const prox = data.proxy || {};
+    document.querySelectorAll('input[name="proxyMode"]').forEach(r => {
+      r.checked = (r.value === (prox.mode || 'system'));
+    });
+    const purl = document.getElementById('setProxyUrl');
+    if(purl) purl.value = prox.url || '';
+    const pState = document.getElementById('setProxyState');
+    if(pState){
+      pState.textContent = prox.env_override ? '(被环境变量覆盖)' : '';
+      pState.style.color = prox.env_override ? 'var(--warn)' : 'var(--dim)';
+    }
+    const pEff = document.getElementById('setProxyEffective');
+    if(pEff) pEff.textContent = '当前生效：' + (prox.effective || '-');
     const set = (id, value) => { const el = document.getElementById(id); if(el) el.textContent = value || '-'; };
     set('setVersion', data.version);
     set('setAccountsDir', data.accounts_dir);
@@ -2424,6 +2467,23 @@ async function loadSettings(showToast){
     if(showToast) toast('设置已刷新', 'ok');
   } catch(e) {
     if(showToast) toast('读取设置失败: ' + e.message, 'bad');
+  }
+}
+
+async function saveProxyConfig(btn){
+  const sel = document.querySelector('input[name="proxyMode"]:checked');
+  const mode = sel ? sel.value : 'system';
+  const url = ((document.getElementById('setProxyUrl') || {}).value || '').trim();
+  if(mode === 'manual' && !url){ toast('手动代理模式需要填写代理地址', 'warn'); return; }
+  if(btn) btn.disabled = true;
+  try {
+    const r = await postJSON('/settings/save', {proxy_mode: mode, proxy_url: url});
+    toast('代理设置已保存并即时生效：' + (r.proxy_saved || ''), 'ok');
+    await loadSettings();
+  } catch(e) {
+    toast('保存代理设置失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
   }
 }
 

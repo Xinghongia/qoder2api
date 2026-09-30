@@ -45,13 +45,14 @@ import uuid
 
 import qoder_accounts
 import qoder_catalog
+import qoder_net
 import qoder_settings
 import qoder_sign
 from qoder_sign import qoder_encode, SESSIONS
 from qoder_accounts import get_realm_config, gateway_candidates, CLIENT_UA
 from pathlib import Path
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 
@@ -1114,6 +1115,7 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
+        "proxy": qoder_net.describe(),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": qoder_settings.settings_path(ACCOUNTS_DIR),
@@ -1423,7 +1425,7 @@ def read_dynamic_models(realm=None):
             url = validate_public_http_url(raw_url)
             req = urllib.request.Request(url, data=sign_body.encode("utf-8"),
                                          method="GET", headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with qoder_net.urlopen(req, timeout=15) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             break
         except Exception as exc:
@@ -2717,7 +2719,7 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 req = urllib.request.Request(chat_url,
                                              data=encoded.encode("utf-8"),
                                              method="POST", headers=headers)
-                resp = urllib.request.urlopen(req, timeout=600)
+                resp = qoder_net.urlopen(req, timeout=600)
                 break
             except urllib.error.HTTPError as exc:
                 try:
@@ -4479,6 +4481,20 @@ class Handler(BaseHTTPRequestHandler):
             API_KEY = new_key
             API_KEY_FILE_SET = True
             reply["api_key_set"] = bool(new_key)
+        if "proxy_mode" in payload:
+            mode = str(payload.get("proxy_mode") or "").strip().lower()
+            url = str(payload.get("proxy_url") or "").strip()
+            if mode not in qoder_net.MODES:
+                return self._error(400,
+                                   "proxy_mode must be system / manual / direct",
+                                   "invalid_request_error")
+            try:
+                qoder_net.configure(mode, url)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            qoder_settings.set_proxy_config(ACCOUNTS_DIR, mode, url)
+            reply["proxy_saved"] = qoder_net.describe()["effective"]
+            log("proxy      : %s" % reply["proxy_saved"])
         if payload.get("restart_scheduler"):
             if SCHEDULER:
                 SCHEDULER.stop()
@@ -5290,7 +5306,7 @@ def main():
     # 拒绝启动第二份：Windows 上 SO_REUSEADDR 会让两个 socket 绑同一端口，
     # 连接被静默分流，极难诊断。
     try:
-        probe = urllib.request.urlopen(
+        probe = qoder_net.urlopen(
             "http://%s:%d/health"
             % ("127.0.0.1" if args.host == "0.0.0.0" else args.host, args.port),
             timeout=2)
@@ -5351,6 +5367,10 @@ def main():
     elif qoder_settings.panel_password_is_default(ACCOUNTS_DIR):
         log("panel      : password is still the default 'admin' - change it "
             "in the panel")
+
+    # 出站代理模式（面板「设置 → 网络代理」可改；环境变量覆盖优先）
+    qoder_net.load_from_settings(ACCOUNTS_DIR)
+    log("proxy      : %s" % qoder_net.describe()["effective"])
 
     POOL = qoder_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()

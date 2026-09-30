@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.1.3-2496ED?style=flat-square" alt="Version 1.1.3">
+  <img src="https://img.shields.io/badge/Release-v1.1.4-2496ED?style=flat-square" alt="Version 1.1.4">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -19,6 +19,7 @@
 - **稳定物理设备指纹隔离 (`derive_id`)**：以账号自身 UID 稳定哈希派生专属 `cosy-machineid` / `cosy-machinetoken` / 会话标识，同一账号长期固定在同一台虚拟物理设备，天然防多号关联风控。
 - **OAuth 设备授权一键免客户端登录**：PKCE (S256) 设备流（双区 URL 参数按官方差异构造：国内带 `redirect_uri+client_id+machine_id`，国际带 `client_id+machine_id`），点击看板链接在浏览器完成授权即可自动入池；亦支持 PAT (`pt-`) 导入，jobToken 自动交换与轮换。
 - **每日签到与额度体系（双区域 · 真实领取）**：「每日领取 100 Credits」等活动**由网关直接领取**——用桌面端请求头（`Cosy-ClientType: 10` + 机器头，缺了服务端会返回空列表）列出活动 → 对 `CLAIMABLE` 的 Credits 活动 `POST /sash/api/v1/me/campaigns/{id}/claim`（官方幂等：已领返回 `replayed`，不会重复发放）；旧 sash 签到接口仅在仍开放时兜底（能力运行时探测，404 记「本区域无此接口」6 小时后自动重探）；Pro 升级包资格检查与领取、quota/usage 额度与套餐快照实时刷新。
+- **统一出站网络层（三档代理模式）**：所有出站请求（模型推理、活动领取、账号接口、模型清单、辅助脚本）统一经过 `qoder_net`——**跟随系统代理**（Windows 直读 Internet Settings 注册表，不受终端环境变量污染）/ **手动指定代理**（如 `http://127.0.0.1:7897`）/ **直连**；看板「设置 → 网络代理」即改即生效，环境变量 `QD_PROXY_MODE`/`QD_PROXY_URL` 可覆盖；本机回环始终直连。
 - **后台常驻定时调度器**：每日整点排程（09:00 / 21:00 签到 · 22:00 Token 集中保活），`drt-` / `jrt-` 按前缀路由刷新，PAT 最终兜底。
 - **双协议全功能支持**：同时支持标准 OpenAI Chat Completions 协议与 Responses API (Codex / Claude Code)，含 custom freeform 工具（`apply_patch`）双向转译与 DSML 工具调用回退解析。
 - **现代化 Web 看板**：弹性指标卡片、签到与福利中心、模型能力清单、性能指标与用量透视、实时请求流水与运行日志。
@@ -353,6 +354,14 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.1.4
+
+**新增：统一出站网络层 `qoder_net`（三档代理模式）**
+- 项目所有出站请求统一经过 `qoder_net`：模型推理（SSE 流）、模型清单、账号/活动接口、设备授权轮询、`_verify_models.py` / `_diag_gateway.py` 辅助脚本；
+- 三档模式：**跟随系统代理**（Windows 优先读 Internet Settings 注册表——即使终端里残留 `HTTP_PROXY/ALL_PROXY` 环境变量也不会被顶掉；拿不到注册表回退环境变量）、**手动指定代理**（`http://host:port`，拒绝 socks 并给出说明）、**直连**；
+- 本机回环（localhost / 127.* / ::1）在任何模式下都直连；看板「设置 → 网络代理」即改即生效（写入 `accounts/settings.json`），启动日志与设置页均显示当前生效路径；环境变量 `QD_PROXY_MODE` / `QD_PROXY_URL` 优先级更高（Docker/临时调试）。
+- 顺带修复：签到与福利中心「全部账号 (批量)」的「积分额度余额」此前显示**首个账号**的快照，现改为各账号**合计**（悬停显示逐账号明细）；单账号视图保持原样。
 
 ### v1.1.3
 

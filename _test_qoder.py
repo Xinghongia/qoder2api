@@ -26,6 +26,7 @@ import qoder_proxy as P
 import qoder_sign as S
 import qoder_catalog as C
 import qoder_accounts as A
+import qoder_net
 import qoder_tasks as T
 
 PASS = FAIL = 0
@@ -386,7 +387,7 @@ check("401 never transient", not P._is_transient_upstream(401, "provider_error")
 
 # 行为级：第一次 418(瞬时) → 重试后成功，账号不背锅
 import urllib.error as _ue3, io as _io3
-_orig_urlopen = P.urllib.request.urlopen
+_orig_urlopen = qoder_net.urlopen
 _calls = {"n": 0}
 
 class _FakeResp(object):
@@ -402,7 +403,7 @@ def _urlopen_fail_once(req, timeout=None):
     return _FakeResp()
 
 try:
-    P.urllib.request.urlopen = _urlopen_fail_once
+    qoder_net.urlopen = _urlopen_fail_once
     # 构造单账号池
     import tempfile as _tf
     _td = _tf.mkdtemp(prefix="qdpool_")
@@ -428,7 +429,7 @@ try:
     check("418-then-success: backoff took ~1s (not instant, not 60s)",
           0.8 <= took <= 4.0, round(took, 2))
 finally:
-    P.urllib.request.urlopen = _orig_urlopen
+    qoder_net.urlopen = _orig_urlopen
 
 # 行为级：持续 418 → 重试耗尽后短冷却（单账号 3s 而非 60s）并抛出原错误
 def _urlopen_always_418(req, timeout=None):
@@ -438,7 +439,7 @@ def _urlopen_always_418(req, timeout=None):
 
 _calls["n"] = 0
 try:
-    P.urllib.request.urlopen = _urlopen_always_418
+    qoder_net.urlopen = _urlopen_always_418
     P.POOL = _pool          # 上一块 finally 还原了 None，这里重新挂上临时池
     _acc.cooldown_until = 0
     _acc.last_error = ""
@@ -460,7 +461,7 @@ try:
     check("persistent 418: bounded backoff time (~3s)",
           2.0 <= took <= 6.0, round(took, 2))
 finally:
-    P.urllib.request.urlopen = _orig_urlopen
+    qoder_net.urlopen = _orig_urlopen
     P.POOL = _orig_pool
     import shutil as _sh
     _sh.rmtree(_td, ignore_errors=True)
@@ -627,7 +628,7 @@ try:
     # (c) 行为：错误短冷却 -> 等待后续上（真实 sleep ~0.3s）而不是429
     _acc14.model_cooldowns.clear()
     _acc14.cooldown_until = _t14.time() + 0.3
-    _orig_urlopen14 = P.urllib.request.urlopen
+    _orig_urlopen14 = qoder_net.urlopen
 
     class _R14(object):
         def __iter__(self):
@@ -646,7 +647,7 @@ try:
         return _R14()
 
     try:
-        P.urllib.request.urlopen = _ok_urlopen
+        qoder_net.urlopen = _ok_urlopen
         _sleep_used = []
         _t0 = _t14.time()
         try:
@@ -666,12 +667,12 @@ try:
         check("wait lasted ~0.3-1s (bounded)", 0.25 <= took <= 2.0,
               round(took, 2))
     finally:
-        P.urllib.request.urlopen = _orig_urlopen14
+        qoder_net.urlopen = _orig_urlopen14
     # (d) 频控行为不变：真429 仍然立刻 RateLimited
     _acc14.cooldown_until = 0
     _acc14.model_cooldowns["qfmodel"] = _t14.time() + 60
     try:
-        P.urllib.request.urlopen = _ok_urlopen
+        qoder_net.urlopen = _ok_urlopen
         _raised14 = None
         try:
             P.open_upstream({"model": "qfmodel",
@@ -684,7 +685,7 @@ try:
               and "frequency" in str(getattr(_raised14, "detail", "")),
               repr(_raised14))
     finally:
-        P.urllib.request.urlopen = _orig_urlopen14
+        qoder_net.urlopen = _orig_urlopen14
 finally:
     P.POOL = _orig_pool14
     _acc14.model_cooldowns.clear()
@@ -1586,6 +1587,9 @@ A.Account.campaigns = lambda self: dict(_A_CAMPAIGNS[self.realm])
 A.Account.fetch_credits = lambda self: {"ok": True, "credits": {}}
 A.Account.fetch_plan = lambda self: ""
 A.Account.pro_eligibility = lambda self: (True, False)
+# 「全部账号 (批量)」的余额应是各账号合计（此前误用首个账号的快照）
+_t_intl.credits = {"remain": 300}
+_t_cn.credits = {"remain": 700}
 try:
     _view_intl = T.fetch_tasks_view(_t_pool, uid="t-intl")
     _view_cn = T.fetch_tasks_view(_t_pool, uid="t-cn")
@@ -1621,6 +1625,19 @@ check("campaign state surfaced in summary (show/claimable/url/items)",
 check("daily row carries a jump url (campaignUrl or activities page)",
       bool(_intl_row.get("jump_url")) and "qoder" in _intl_row["jump_url"],
       _intl_row.get("jump_url"))
+check("batch view balance = SUM across accounts (not first snapshot)",
+      _view_all["summary"].get("energy") == 1000,
+      _view_all["summary"].get("energy"))
+check("batch view carries the per-account breakdown",
+      [(b["uid"], b["remain"])
+       for b in _view_all["summary"].get("energy_breakdown") or []]
+      == [("t-intl", 300), ("t-cn", 700)],
+      _view_all["summary"].get("energy_breakdown"))
+check("single-account view keeps that account's own balance (no breakdown)",
+      _view_cn["summary"].get("energy") == 700
+      and not _view_cn["summary"].get("energy_breakdown"),
+      (_view_cn["summary"].get("energy"),
+       _view_cn["summary"].get("energy_breakdown")))
 
 print()
 print("[19] gateway host failover (official intl api1 -> api2; CN single host)")
@@ -1635,7 +1652,7 @@ check("gateway_candidates: cn has a single official host",
 
 # 行为：api1 传输层失败 -> 自动切到 api2 并在同一请求内成功
 import ssl as _ssl19
-_orig_urlopen19 = P.urllib.request.urlopen
+_orig_urlopen19 = qoder_net.urlopen
 _hits19 = []
 
 
@@ -1662,7 +1679,7 @@ _pool19.accounts = [A.Account({"uid": "h19", "realm": "intl",
                                "domain": "qoder.com",
                                "accessToken": "dt-x"})]
 P.POOL = _pool19
-P.urllib.request.urlopen = _fake_urlopen19
+qoder_net.urlopen = _fake_urlopen19
 try:
     _resp19, _acc19, _ = P.open_upstream(
         {"model": "qmodel", "stream": True,
@@ -1672,7 +1689,7 @@ try:
 except Exception as exc:                      # pragma: no cover - failure path
     _err19 = exc
 finally:
-    P.urllib.request.urlopen = _orig_urlopen19
+    qoder_net.urlopen = _orig_urlopen19
     P.POOL = _orig_pool19
 
 check("failover: request succeeded after primary host transport error",
@@ -1916,6 +1933,90 @@ _body_off = P.build_qoder_body(
 check("unsupported effort on a level-less model is dropped from the body",
       "reasoning_effort" not in (_body_off.get("parameters") or {}),
       _body_off.get("parameters"))
+
+print()
+print("[21] outbound proxy layer (qoder_net: system / manual / direct)")
+import urllib.request as _ur21
+
+_env_backup21 = {k: os.environ.get(k) for k in ("QD_PROXY_MODE", "QD_PROXY_URL")}
+for _k21 in _env_backup21:
+    os.environ.pop(_k21, None)
+_orig_registry21 = getattr(_ur21, "getproxies_registry", None)
+_orig_getproxies21 = _ur21.getproxies
+try:
+    qoder_net.configure("direct")
+    check("direct mode -> empty proxies table", qoder_net.proxies() == {},
+          qoder_net.proxies())
+    check("direct mode describes itself", "直连" in qoder_net.describe()["effective"])
+
+    qoder_net.configure("manual", "127.0.0.1:7897")
+    _p21 = qoder_net.proxies()
+    check("manual mode -> http+https + loopback bypass",
+          _p21.get("http") == "http://127.0.0.1:7897"
+          and _p21.get("https") == "http://127.0.0.1:7897"
+          and "localhost" in (_p21.get("no") or ""), _p21)
+    try:
+        qoder_net.configure("manual", "")
+        check("manual without address rejected", False)
+    except ValueError:
+        check("manual without address rejected", True)
+    try:
+        qoder_net.configure("manual", "socks5://127.0.0.1:1080")
+        check("socks proxy rejected with a clear message", False)
+    except ValueError as _exc21:
+        check("socks proxy rejected with a clear message",
+              "socks" in str(_exc21), str(_exc21))
+    check("bogus mode falls back to system",
+          qoder_net.configure("bogus")["mode"] == "system")
+
+    # system：优先读 Windows 注册表（避免被终端 env 变量顶掉），空则回退 getproxies()
+    _ur21.getproxies_registry = lambda: {"http": "http://reg.local:1",
+                                         "https": "http://reg.local:1"}
+    qoder_net.configure("system")
+    check("system prefers the registry (real Windows system proxy)",
+          qoder_net.proxies().get("https") == "http://reg.local:1"
+          and "localhost" in (qoder_net.proxies().get("no") or ""),
+          qoder_net.proxies())
+    _ur21.getproxies_registry = lambda: {}
+    _ur21.getproxies = lambda: {"https": "http://env.local:2"}
+    qoder_net.configure("system")
+    check("system falls back to getproxies() when registry is empty",
+          qoder_net.proxies().get("https") == "http://env.local:2",
+          qoder_net.proxies())
+
+    # 环境变量优先（Docker/调试场景）
+    os.environ["QD_PROXY_MODE"] = "direct"
+    check("env var QD_PROXY_MODE wins over stored config",
+          qoder_net.configure("system")["mode"] == "direct"
+          and qoder_net.proxies() == {}
+          and qoder_net.current()["env_override"] is True)
+    os.environ.pop("QD_PROXY_MODE", None)
+
+    # 回环地址任何模式下都直连
+    check("loopback hosts always go direct",
+          qoder_net.is_loopback("127.0.0.1") and qoder_net.is_loopback("localhost")
+          and qoder_net.is_loopback("::1") and not qoder_net.is_loopback("qoder.com"))
+    qoder_net.configure("manual", "http://127.0.0.1:7897")
+    check("loopback request picks the direct opener (manual mode)",
+          qoder_net.opener_for("http://127.0.0.1:8790/health")
+          is qoder_net._direct_opener
+          and qoder_net.opener_for("https://openapi.qoder.sh/x")
+          is not qoder_net._direct_opener)
+finally:
+    if _orig_registry21 is not None:
+        _ur21.getproxies_registry = _orig_registry21
+    else:
+        try:
+            delattr(_ur21, "getproxies_registry")
+        except Exception:
+            pass
+    _ur21.getproxies = _orig_getproxies21
+    for _k21, _v21 in _env_backup21.items():
+        if _v21 is None:
+            os.environ.pop(_k21, None)
+        else:
+            os.environ[_k21] = _v21
+    qoder_net.configure("system")
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

@@ -24,6 +24,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qoder_net          # 统一出站层；回环地址始终直连
+
 OK = "[ OK ]"
 BAD = "[FAIL]"
 
@@ -78,7 +81,7 @@ def http(url, key=None, timeout=10, data=None, allow_remote=False):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, method="POST" if data else "GET",
                                  headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with qoder_net.urlopen(req, timeout=timeout) as resp:
         return resp.status, resp.read().decode("utf-8", "replace")
 
 
@@ -160,7 +163,7 @@ def main():
                         if args.key else {})})
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with qoder_net.urlopen(req, timeout=180) as resp:
                 first = None
                 n_line = 0
                 buf = b""
