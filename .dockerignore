@@ -1,0 +1,14 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+python/
+*.bat
+*.zip
+*.bak*
+temp_*
+_acc
+_use
+.DS_Store

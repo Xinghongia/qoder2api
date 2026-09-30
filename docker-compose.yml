@@ -1,0 +1,17 @@
+services:
+  qoder-proxy:
+    build: .
+    image: qoder-proxy:latest
+    container_name: qoder-proxy
+    restart: unless-stopped
+    ports:
+      - "8790:8790"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8790
+      # - API_KEY=your_api_key_here
+      - TZ=Asia/Shanghai
+    volumes:
+      # 持久化挂载账号凭证与用量流水
+      - ./accounts:/app/accounts
+      - ./usage:/app/usage
