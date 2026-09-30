@@ -52,7 +52,7 @@ from qoder_sign import qoder_encode, SESSIONS
 from qoder_accounts import get_realm_config, gateway_candidates, CLIENT_UA
 from pathlib import Path
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 if CURRENT_REALM not in ("intl", "cn"):
@@ -2696,6 +2696,61 @@ def aggregate_with_envelope_retry(resp, payload, session_key, realm, model,
                 pass
 
 
+class _LeasedResp(object):
+    """带账号在途计数的上游响应代理（least-busy 调度用）。
+
+    流式响应从 open 到 close / with 退出期间在途数 +1；close 或退出时
+    恰好释放一次（重复 close 安全）。其余属性/方法原样转发给底层响应。
+    """
+
+    __slots__ = ("_resp", "_account", "_released")
+
+    def __init__(self, resp, account):
+        self._resp = resp
+        self._account = account
+        self._released = False
+
+    def _release(self):
+        if not self._released:
+            self._released = True
+            try:
+                self._account.in_flight = max(
+                    0, getattr(self._account, "in_flight", 0) - 1)
+            except Exception:
+                pass
+
+    def __enter__(self):
+        enter = getattr(self._resp, "__enter__", None)
+        if enter is not None:
+            try:
+                enter()
+            except Exception:
+                pass
+        return self
+
+    def __exit__(self, *args):
+        try:
+            exit_fn = getattr(self._resp, "__exit__", None)
+            if exit_fn is not None:
+                return exit_fn(*args)
+        finally:
+            self._release()
+
+    def close(self):
+        try:
+            close = getattr(self._resp, "close", None)
+            if close is not None:
+                close()
+        finally:
+            self._release()
+
+    def __iter__(self):
+        return iter(self._resp)
+
+    def __getattr__(self, name):
+        return getattr(self._resp, name)
+
+
 def open_upstream(payload, session_key=None, target_realm=None):
     """构造 COSY 签名请求并打开上游 SSE。返回 (resp, account, encoded)。
 
@@ -2836,7 +2891,9 @@ def open_upstream(payload, session_key=None, target_realm=None):
 
         if resp is not None:
             account.clear_error(model=model)
-            return resp, account, encoded
+            # 在途计数 +1：响应关闭（close / with 退出）时释放，供 least-busy 调度
+            account.in_flight = getattr(account, "in_flight", 0) + 1
+            return _LeasedResp(resp, account), account, encoded
 
         exc = last_exc
         # ---- 错误分类（与原有轮换语义一致） ----
@@ -2860,7 +2917,8 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 dead = qoder_accounts.session_dead(detail)
                 account.note_error("HTTP %s %s" % (exc.code, detail[:80]),
                                    cooldown=300 if dead else 60,
-                                   single_account=(total <= 1))
+                                   single_account=(total <= 1),
+                                   escalate=True)
                 if dead:
                     account.enabled = False
                     account.save(ACCOUNTS_DIR) if account.path else None

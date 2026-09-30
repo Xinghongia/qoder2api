@@ -2094,5 +2094,110 @@ check("pick still serves from depleted accounts when nothing else is ready",
       _qd_pool.pick(realm="cn") is not None)
 
 print()
+print("[23] scheduling v2: consecutive-failure backoff + least-busy lease")
+
+# --- 连续失败退避（仅账号侧错误 401/403 等，escalate 显式开启） ---
+_bo = A.Account({"uid": "bo-1", "realm": "cn", "accessToken": "dt-x"})
+_t023 = time.time()
+_bo.note_error("HTTP 401 x", cooldown=60, escalate=True)
+_c1 = _bo.cooldown_until - _t023
+_bo.note_error("HTTP 401 x", cooldown=60, escalate=True)
+_c2 = _bo.cooldown_until - _t023
+_bo.note_error("HTTP 401 x", cooldown=60, escalate=True)
+_c3 = _bo.cooldown_until - _t023
+_bo.note_error("HTTP 401 x", cooldown=60, escalate=True)
+_c4 = _bo.cooldown_until - _t023
+check("escalating cooldown ladder 60 -> 300 -> 900 -> 1800s",
+      _c1 <= 61 and 299 <= _c2 <= 301 and 899 <= _c3 <= 901
+      and 1799 <= _c4 <= 1801,
+      tuple(round(x) for x in (_c1, _c2, _c3, _c4)))
+_bo.clear_error()
+check("one success resets the failure counter + cooldown",
+      _bo.consecutive_failures == 0 and _bo.cooldown_until == 0)
+_bo.note_error("upstream transient", cooldown=15)          # 非 escalate
+check("upstream transient cooldown does NOT escalate (not the account's fault)",
+      _bo.consecutive_failures == 0
+      and 14 <= (_bo.cooldown_until - time.time()) <= 16)
+_bo.cooldown_until = 0
+_bo.note_error("HTTP 401 single", cooldown=300, single_account=True,
+               escalate=True)
+check("single-account pool never gets the long ladder (kept short)",
+      _bo.consecutive_failures == 0
+      and (_bo.cooldown_until - time.time()) <= 4)
+_bo.cooldown_until = 0
+
+# --- least-busy：在途少的优先；同负载保持轮询 ---
+_lb_a = A.Account({"uid": "lb-a", "realm": "cn", "accessToken": "dt-x"})
+_lb_b = A.Account({"uid": "lb-b", "realm": "cn", "accessToken": "dt-x"})
+_lb_pool = A.AccountPool(os.path.join(os.environ["ACCOUNTS_DIR"], "unused23"))
+_lb_pool.accounts = [_lb_a, _lb_b]
+_lb_a.credits = {"remain": 500, "size": 500, "exceeded": False}
+_lb_b.credits = {"remain": 500, "size": 500, "exceeded": False}
+_lb_a.in_flight = 3                      # a 正被长流式请求占着
+check("least-busy: the idle account wins even mid-round-robin",
+      _lb_pool.pick(realm="cn").uid == "lb-b"
+      and _lb_pool.pick(realm="cn").uid == "lb-b")
+_lb_a.in_flight = 0
+_lb_pool._cursor = 0
+check("equal in-flight keeps the plain round-robin order",
+      [_lb_pool.pick(realm="cn").uid for _i in range(2)] == ["lb-a", "lb-b"])
+
+# --- 在途租约：open 后 +1，close / with 退出恰好释放一次 ---
+class _LeaseResp(object):
+    def __init__(self):
+        self.closes = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def close(self):
+        self.closes += 1
+
+    def read(self, *a):
+        return b"{}"
+
+    def __iter__(self):
+        return iter([b"data: {}\n\n"])
+
+
+_lease_resp = _LeaseResp()
+_orig_urlopen23 = qoder_net.urlopen
+qoder_net.urlopen = lambda req, timeout=None: _lease_resp
+_orig_pool23 = P.POOL
+import tempfile as _tf23
+_TD23 = _tf23.mkdtemp(prefix="qdlease_")
+_pool23 = A.AccountPool(_TD23)
+_pool23.accounts = [A.Account({"uid": "lease-1", "realm": "cn",
+                               "accessToken": "dt-test",
+                               "refreshToken": "drt-test",
+                               "expiresAt": 9999999999})]
+P.POOL = _pool23
+try:
+    _resp23, _acc23, _ = P.open_upstream(
+        {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
+         "stream": False}, target_realm="cn")
+    check("lease: in-flight +1 while the response is open",
+          _acc23.in_flight == 1, _acc23.in_flight)
+    with _resp23:
+        pass
+    check("lease: with-exit releases the in-flight slot",
+          _acc23.in_flight == 0, _acc23.in_flight)
+    _resp23c, _acc23c, _ = P.open_upstream(
+        {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
+         "stream": False}, target_realm="cn")
+    _resp23c.close()
+    _resp23c.close()
+    check("lease: explicit double close releases exactly once",
+          _acc23c.in_flight == 0, _acc23c.in_flight)
+finally:
+    qoder_net.urlopen = _orig_urlopen23
+    P.POOL = _orig_pool23
+    import shutil as _sh23
+    _sh23.rmtree(_TD23, ignore_errors=True)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

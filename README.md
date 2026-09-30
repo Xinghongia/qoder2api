@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.1.5-2496ED?style=flat-square" alt="Version 1.1.5">
+  <img src="https://img.shields.io/badge/Release-v1.1.6-2496ED?style=flat-square" alt="Version 1.1.6">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -354,6 +354,13 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.1.6
+
+**优化：账号调度 v2（对齐主流开源网关做法）**
+- **连续失败阶梯退避**（one-api「自动禁用」/ LiteLLM `cooldown` 的轻量版）：账号侧错误（401/403 凭证被拒、会话失效）连续发生时，冷却按 60s → 5min → 15min → 30min 阶梯退避，任意一次成功即清零——坏账号不会再每轮冷却后被反复选中白烧请求；上游瞬时故障（provider_error / TLS 抖动）与客户端参数错误**不进阶梯**（延续"不因上游的锅罚账号"）；单账号池不启用长阶梯，避免把唯一账号冷死。
+- **least-busy 在途感知**（LiteLLM `least-busy` 思路）：每个账号维护在途请求数（响应关闭 / with 退出时恰好释放一次），同额度档内优先选**在途最少**的账号（稳定排序：同负载时保持轮询顺序）——长时间流式对话不再把新请求堆到已被占用的账号上。
+- 账号视图新增 `inFlight` / `consecutiveFailures` 字段，看板与排障可见。
 
 ### v1.1.5
 

@@ -421,6 +421,10 @@ class Account(object):
         self.enabled = data.get("enabled", True)
         self.last_error = str(data.get("lastError") or "")
         self.cooldown_until = float(data.get("cooldownUntil") or 0)
+        # 调度状态（仅内存）：在途请求数（least-busy 平手裁决，响应关闭时释放）
+        # 与账号侧连续失败数（401/403 等退避用，成功一次清零）
+        self.in_flight = 0
+        self.consecutive_failures = 0
         # 按模型粒度的限流冷却：上游频控只针对单模型，不能拖垮整个账号。
         self.model_cooldowns = {}
         self.credits = data.get("credits") or None
@@ -480,6 +484,8 @@ class Account(object):
             "hasRefreshToken": bool(self.refresh_token),
             "hasPAT": bool(self.personal_token),
             "lastError": self.last_error,
+            "inFlight": getattr(self, "in_flight", 0),
+            "consecutiveFailures": getattr(self, "consecutive_failures", 0),
             "inCooldown": self.cooldown_until > time.time(),
             "cooldownFor": round(max(0.0, self.cooldown_until - time.time())) or None,
             "addedAt": self.added_at,
@@ -555,7 +561,8 @@ class Account(object):
             return False
         return remain <= 0 and size > 0
 
-    def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
+    def note_error(self, message, cooldown=60, single_account=False, model=None,
+                   until=None, escalate=False):
         self.last_error = str(message)[:200]
         if model:
             wait = max(1.0, float(until) - time.time()) if until else (
@@ -563,6 +570,16 @@ class Account(object):
             self.model_cooldowns[model] = time.time() + wait
             return
         actual_cooldown = 3 if single_account else cooldown
+        if escalate and not single_account:
+            # 账号侧连续失败（如 401/403 凭证被拒）：冷却按 60s→5min→15min→
+            # 30min 阶梯退避，避免坏账号每轮冷却后被反复选中白烧请求；
+            # 任意一次成功（clear_error）即清零。上游瞬时故障不在此列——
+            # 那是上游的锅，不该罚账号（调用方按 escalate 显式区分）。
+            self.consecutive_failures = getattr(self, "consecutive_failures", 0) + 1
+            ladder = (60, 300, 900, 1800)
+            actual_cooldown = max(
+                actual_cooldown,
+                ladder[min(self.consecutive_failures - 1, len(ladder) - 1)])
         self.cooldown_until = time.time() + actual_cooldown
 
     def throttle_wait(self, model=None):
@@ -580,6 +597,7 @@ class Account(object):
             self.model_cooldowns.pop(model, None)
         else:
             self.model_cooldowns.clear()
+        self.consecutive_failures = 0
         if self.last_error or self.cooldown_until:
             self.last_error = ""
             self.cooldown_until = 0
@@ -1377,7 +1395,11 @@ class AccountPool(object):
         if not ready_list:
             return None
         primary = [a for a in ready_list if not a.quota_depleted()]
-        account = (primary or ready_list)[0]
+        pool_list = primary or ready_list
+        # least-busy：在途请求少的优先；稳定排序，同负载时保持轮询顺序。
+        # （长时间流式请求占着账号时，新请求会落到更空闲的账号上。）
+        pool_list.sort(key=lambda a: getattr(a, "in_flight", 0))
+        account = pool_list[0]
         with self._lock:
             self._cursor = (snapshot.index(account) + 1) % total
         return account
