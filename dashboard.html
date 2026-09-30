@@ -306,9 +306,12 @@ a:hover{text-decoration:underline}
         <span id="activeGatewayName" style="font-size:20px;font-weight:700;color:var(--accent);letter-spacing:-.4px">国际版 (Global)</span>
       </div>
       <div style="margin-top:auto">
-        <button class="toggle-realm-btn" id="btnToggleRealm" onclick="toggleActiveGatewayRealm()" style="cursor:pointer;width:100%;padding:7px 12px;font-size:12px">
-          ⇄ 切换默认出口为【国内版】
-        </button>
+        <select id="realmModeSelect" onchange="setRealmMode(this.value)" style="width:100%;padding:7px 10px;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--fg);font-family:inherit;cursor:pointer">
+          <option value="intl">仅国际版</option>
+          <option value="cn">仅国内版</option>
+          <option value="both:intl">双区 · 优先国际版</option>
+          <option value="both:cn">双区 · 优先国内版</option>
+        </select>
       </div>
     </div>
 
@@ -845,6 +848,8 @@ async function pollLogin(){
 
 
 window.ACTIVE_GATEWAY_REALM = "intl";
+window.ACTIVE_GATEWAY_MODE = "intl";        // intl | cn | both
+window.ACTIVE_GATEWAY_PREFERRED = "intl";   // both 模式下的优先出口
 window.VIEW_REALM = "intl";
 window.REALM_FILTER = "all";
 window.MODELS_DATA = [];
@@ -862,24 +867,29 @@ function updateUI(){
   if(vbCn) vbCn.style.display = !isIntlView ? "inline-block" : "none";
 
   const isIntlGw = (window.ACTIVE_GATEWAY_REALM === "intl");
+  const gwMode = window.ACTIVE_GATEWAY_MODE || window.ACTIVE_GATEWAY_REALM;
+  const gwPref = window.ACTIVE_GATEWAY_PREFERRED || window.ACTIVE_GATEWAY_REALM;
+  const bothMode = (gwMode === "both");
   const dbIntl = document.getElementById("tabIntlDefaultBadge");
-  if(dbIntl) dbIntl.style.display = isIntlGw ? "inline-block" : "none";
+  if(dbIntl) dbIntl.style.display = (!bothMode && isIntlGw) ? "inline-block" : "none";
   const dbCn = document.getElementById("tabCnDefaultBadge");
-  if(dbCn) dbCn.style.display = !isIntlGw ? "inline-block" : "none";
+  if(dbCn) dbCn.style.display = (!bothMode && !isIntlGw) ? "inline-block" : "none";
 
   const gwName = document.getElementById("activeGatewayName");
   if(gwName) {
-    gwName.textContent = isIntlGw ? "国际版 (Global)" : "国内版 (China)";
+    gwName.textContent = bothMode
+      ? (gwPref === "intl" ? "双区 · 优先国际版" : "双区 · 优先国内版")
+      : (isIntlGw ? "国际版 (Global)" : "国内版 (China)");
     gwName.style.color = isIntlGw ? "var(--accent)" : "#dc2626";
   }
   const ep = document.getElementById("activeEndpoint");
-  if(ep) ep.textContent = isIntlGw ? "https://api1.qoder.sh" : "https://gateway.qoder.com.cn";
+  if(ep) ep.textContent = bothMode
+    ? "双区自动切换（优先https://" + (gwPref === "intl" ? "api1.qoder.sh" : "gateway.qoder.com.cn") + "）"
+    : (isIntlGw ? "https://api1.qoder.sh" : "https://gateway.qoder.com.cn");
 
-  const btnToggle = document.getElementById("btnToggleRealm");
-  if(btnToggle) {
-    btnToggle.textContent = isIntlGw ? "切换默认出口为【国内版】" : "切换默认出口为【国际版】";
-    btnToggle.style.borderColor = isIntlGw ? "#dc2626" : "var(--accent)";
-    btnToggle.style.color = isIntlGw ? "#dc2626" : "var(--accent)";
+  const selRealm = document.getElementById("realmModeSelect");
+  if(selRealm) {
+    selRealm.value = bothMode ? ("both:" + gwPref) : gwMode;
   }
   const cardGw = document.getElementById("cardGatewayCtrl");
   if(cardGw){
@@ -940,16 +950,26 @@ async function switchViewRealm(r){
   await refresh();
 };
 
-async function toggleActiveGatewayRealm(){
-  const next = (window.ACTIVE_GATEWAY_REALM === "intl" ? "cn" : "intl");
+function realmModeText(mode, pref){
+  if(mode === "both") return "双区（优先" + (pref === "intl" ? "国际版" : "国内版") + "，失效自动切换）";
+  return mode === "intl" ? "仅国际版" : "仅国内版";
+}
+
+async function setRealmMode(value){
+  const parts = String(value || "").split(":");
+  const mode = parts[0];
+  const preferred = parts[1] || mode;
   try {
-    const res = await postJSON("/realm", {realm: next});
-    window.ACTIVE_GATEWAY_REALM = res.current || next;
-    toast("网关默认上游已切换并永久保存为: " + (window.ACTIVE_GATEWAY_REALM === "intl" ? "国际版" : "国内版"));
+    const res = await postJSON("/realm", {mode: mode, preferred: preferred});
+    window.ACTIVE_GATEWAY_MODE = res.mode || mode;
+    window.ACTIVE_GATEWAY_PREFERRED = res.preferred || preferred;
+    window.ACTIVE_GATEWAY_REALM = res.current || preferred;
+    toast("网关出口已保存并生效: " + realmModeText(window.ACTIVE_GATEWAY_MODE, window.ACTIVE_GATEWAY_PREFERRED));
     window.VIEW_REALM = window.ACTIVE_GATEWAY_REALM;
     window.updateUI();
     await loadAccounts();
     await loadModels();
+    await loadGrowthTasks();
     await refresh();
   }catch(e){
     alert("切换失败: " + e.message);
@@ -960,6 +980,8 @@ async function initRealm(){
   try {
     const r = await getJSON("/realm");
     if(r && r.current) window.ACTIVE_GATEWAY_REALM = r.current;
+    if(r && r.mode) window.ACTIVE_GATEWAY_MODE = r.mode;
+    if(r && r.preferred) window.ACTIVE_GATEWAY_PREFERRED = r.preferred;
   } catch(e){}
   window.VIEW_REALM = window.ACTIVE_GATEWAY_REALM;
   const viewFromUrl = new URLSearchParams(window.location.search).get('view');

@@ -2019,5 +2019,80 @@ finally:
     qoder_net.configure("system")
 
 print()
+print("[22] realm modes (intl / cn / both + failover) & quota-aware account pick")
+
+_orig_accounts_dir22 = P.ACCOUNTS_DIR
+_orig_state_file22 = P.REALM_STATE_FILE
+_orig_mode22 = (P.REALM_MODE, P.REALM_PREFERRED, P.CURRENT_REALM)
+import tempfile as _tf22
+_TD22 = _tf22.mkdtemp(prefix="qdrealm_")
+P.ACCOUNTS_DIR = _TD22
+P.REALM_STATE_FILE = os.path.join(_TD22, "active_realm.json")
+try:
+    P.save_persisted_realm("cn")
+    check("single realm: candidates = [cn]; explicit binding still wins",
+          P.realm_candidates(model="Qwen3.8-Flash") == ["cn"]
+          and P.realm_candidates(model="Qwen3.8-Flash", explicit="intl") == ["intl"])
+    P.save_persisted_realm("both", "intl")
+    check("both mode: preferred first, other realm as automatic fallback",
+          P.realm_candidates(model="Qwen3.8-Flash") == ["intl", "cn"])
+    check("exclusive model pins to its owner realm even in both mode",
+          P.realm_candidates(model="q37fmodel") == ["cn"]
+          and P.realm_candidates(model="smodel") == ["intl"],
+          (P.realm_candidates(model="q37fmodel"),
+           P.realm_candidates(model="smodel")))
+
+    with open(P.REALM_STATE_FILE, "w", encoding="utf-8") as _fh22:
+        json.dump({"realm": "cn"}, _fh22)
+    P.REALM_MODE, P.REALM_PREFERRED = "intl", "intl"
+    P.load_persisted_realm()
+    check("legacy state file {\"realm\": cn} loads as single-realm mode",
+          P.REALM_MODE == "cn" and P.REALM_PREFERRED == "cn"
+          and P.CURRENT_REALM == "cn")
+    with open(P.REALM_STATE_FILE, "w", encoding="utf-8") as _fh22:
+        json.dump({"mode": "both", "preferred": "intl"}, _fh22)
+    P.load_persisted_realm()
+    check("two-realm state file loads mode+preferred",
+          P.REALM_MODE == "both" and P.REALM_PREFERRED == "intl")
+
+    _orig_pool22 = P.POOL
+    _orig_count_ready22 = A.AccountPool.count_ready
+    P.POOL = A.AccountPool(os.path.join(os.environ["ACCOUNTS_DIR"], "unused22b"))
+    try:
+        A.AccountPool.count_ready = \
+            lambda self, realm=None, model=None: (1 if realm == "cn" else 0)
+        check("pick_serving_realm falls back when the preferred realm is unusable",
+              P.pick_serving_realm(["intl", "cn"], model="Qwen3.8-Flash") == "cn"
+              and P.pick_serving_realm(["cn", "intl"], model="Qwen3.8-Flash") == "cn")
+        A.AccountPool.count_ready = lambda self, realm=None, model=None: 0
+        check("pick_serving_realm keeps the first candidate when none are usable",
+              P.pick_serving_realm(["intl", "cn"], model="x") == "intl")
+    finally:
+        A.AccountPool.count_ready = _orig_count_ready22
+        P.POOL = _orig_pool22
+finally:
+    P.ACCOUNTS_DIR, P.REALM_STATE_FILE = _orig_accounts_dir22, _orig_state_file22
+    P.REALM_MODE, P.REALM_PREFERRED, P.CURRENT_REALM = _orig_mode22
+    import shutil as _sh22
+    _sh22.rmtree(_TD22, ignore_errors=True)
+
+# 额度感知调度：已耗尽账号降为后备档（不判死，主档空了照样顶上）
+_qd_a = A.Account({"uid": "qd-a", "realm": "cn", "accessToken": "dt-x"})
+_qd_b = A.Account({"uid": "qd-b", "realm": "cn", "accessToken": "dt-x"})
+_qd_pool = A.AccountPool(os.path.join(os.environ["ACCOUNTS_DIR"], "unused22"))
+_qd_pool.accounts = [_qd_a, _qd_b]
+_qd_a.credits = {"remain": 0, "size": 500, "exceeded": True}
+_qd_b.credits = {"remain": 300, "size": 500, "exceeded": False}
+check("quota_depleted flags exceeded / zero-balance-with-quota only",
+      _qd_a.quota_depleted() is True and _qd_b.quota_depleted() is False
+      and A.Account({"uid": "q0", "realm": "cn"}).quota_depleted() is False)
+_picks22 = [_qd_pool.pick(realm="cn").uid for _i in range(3)]
+check("pick prefers the non-depleted account (round-robin within the tier)",
+      _picks22 == ["qd-b", "qd-b", "qd-b"], _picks22)
+_qd_b.credits = {"remain": 0, "size": 500, "exceeded": True}
+check("pick still serves from depleted accounts when nothing else is ready",
+      _qd_pool.pick(realm="cn") is not None)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

@@ -52,9 +52,16 @@ from qoder_sign import qoder_encode, SESSIONS
 from qoder_accounts import get_realm_config, gateway_candidates, CLIENT_UA
 from pathlib import Path
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
+if CURRENT_REALM not in ("intl", "cn"):
+    CURRENT_REALM = "cn"
+# 出口模式：intl / cn = 仅该区；both = 双区都启用（优先 REALM_PREFERRED，
+# 首选无可用账号时自动切到另一区）。CURRENT_REALM 始终等于首选/单区出口，
+# 供面板展示与默认上下文使用。
+REALM_MODE = CURRENT_REALM
+REALM_PREFERRED = "cn" if REALM_MODE == "both" else REALM_MODE
 
 
 # 198.18.0.0/15 (RFC 2544 benchmarking) 与 fdfe:dcba:9876::/48 被 Clash/mihomo
@@ -835,40 +842,89 @@ ACCOUNTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "account
 REALM_STATE_FILE = os.path.join(ACCOUNTS_DIR, "active_realm.json")
 
 
+def _normalize_realm_state(mode, preferred=None):
+    """把 (mode, preferred) 归一化为合法组合；非法输入回退到当前状态。"""
+    mode = str(mode or "").strip().lower()
+    preferred = str(preferred or "").strip().lower()
+    if mode not in ("intl", "cn", "both"):
+        mode = REALM_MODE
+    if mode == "both":
+        if preferred not in ("intl", "cn"):
+            preferred = REALM_PREFERRED if REALM_PREFERRED in ("intl", "cn") \
+                else "cn"
+    else:
+        preferred = mode
+    return mode, preferred
+
+
 def load_persisted_realm():
-    global CURRENT_REALM
+    global CURRENT_REALM, REALM_MODE, REALM_PREFERRED
     if os.path.isfile(REALM_STATE_FILE):
         try:
             with open(REALM_STATE_FILE, "r", encoding="utf-8") as fh:
                 d = json.load(fh)
-                r = d.get("realm")
-                if r in ("intl", "cn"):
-                    CURRENT_REALM = r
-                    return CURRENT_REALM
+            # 兼容旧格式 {"realm": "cn"}（v1.1.4 之前只有单区开关）
+            mode, preferred = _normalize_realm_state(d.get("mode") or d.get("realm"),
+                                                     d.get("preferred"))
+            REALM_MODE, REALM_PREFERRED = mode, preferred
+            CURRENT_REALM = preferred
         except Exception as e:
             log("could not load active realm: %s" % e)
     return CURRENT_REALM
 
 
-def save_persisted_realm(realm):
-    global CURRENT_REALM
-    if realm in ("intl", "cn"):
-        CURRENT_REALM = realm
-        try:
-            state_dir = Path(ACCOUNTS_DIR).resolve()
-            state_dir.mkdir(parents=True, exist_ok=True)
-            state_file = state_dir / os.path.basename(REALM_STATE_FILE)
-            if not state_file.is_relative_to(state_dir):
-                raise ValueError("realm state path escapes base directory")
-            state_file.write_text(
-                json.dumps({"realm": realm, "updated_at": time.time(),
-                            "updated_iso": time.strftime("%Y-%m-%d %H:%M:%S")},
-                           indent=2),
-                encoding="utf-8")
-            log("persisted active realm '%s' to disk" % realm)
-        except Exception as exc:
-            log("failed to persist active realm: %s" % exc)
+def save_persisted_realm(mode, preferred=None):
+    """持久化出口模式：intl / cn / both(+preferred)。"""
+    global CURRENT_REALM, REALM_MODE, REALM_PREFERRED
+    mode, preferred = _normalize_realm_state(mode, preferred)
+    REALM_MODE, REALM_PREFERRED = mode, preferred
+    CURRENT_REALM = preferred
+    try:
+        state_dir = Path(ACCOUNTS_DIR).resolve()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / os.path.basename(REALM_STATE_FILE)
+        if not state_file.is_relative_to(state_dir):
+            raise ValueError("realm state path escapes base directory")
+        state_file.write_text(
+            json.dumps({"mode": mode, "preferred": preferred,
+                        "realm": preferred,   # 旧版字段，向后兼容
+                        "updated_at": time.time(),
+                        "updated_iso": time.strftime("%Y-%m-%d %H:%M:%S")},
+                       indent=2),
+            encoding="utf-8")
+        log("persisted realm mode '%s' (preferred=%s) to disk"
+            % (mode, preferred))
+    except Exception as exc:
+        log("failed to persist active realm: %s" % exc)
     return CURRENT_REALM
+
+
+def realm_candidates(model=None, explicit=None):
+    """一次请求可用的出口列表（按优先级）。
+
+    显式指定（Key 绑定 / X-Realm / ?realm=）只用该出口；区域独占模型固定
+    在归属出口；否则按面板模式：单区=只有该区；双区(both)=优先首选出口，
+    首选无可用账号时自动换另一个（见 pick_serving_realm）。
+    """
+    if explicit in ("intl", "cn"):
+        return [explicit]
+    owner = exclusive_realm(model) if model else ""
+    if owner:
+        return [owner]
+    if REALM_MODE == "both":
+        other = "cn" if REALM_PREFERRED == "intl" else "intl"
+        return [REALM_PREFERRED, other]
+    return [REALM_MODE]
+
+
+def pick_serving_realm(candidates, model=None):
+    """选实际服务本次请求的出口：首选有可用账号就用首选；没有就顺延到
+    下一个有账号的出口；全都没有时仍返回第一个（让错误信息更直观）。"""
+    if POOL:
+        for r in candidates:
+            if POOL.count_ready(r, model=model) > 0:
+                return r
+    return candidates[0]
 
 
 API_KEY = None
@@ -2651,8 +2707,12 @@ def open_upstream(payload, session_key=None, target_realm=None):
       - 其他 4xx（含客户端参数错）-> 快速失败，冷却换号，不重试
     全部账号失败后抛 RateLimited 或最后一个错误。
     """
-    realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
+    candidates = realm_candidates(model=model, explicit=target_realm)
+    realm = pick_serving_realm(candidates, model=model)
+    if realm != candidates[0]:
+        log("realm fallback: %s -> %s (首选出口当前没有可用账号)"
+            % (candidates[0], realm), level="WARN", tag="chat")
     model_key = qoder_catalog.resolve_upstream_key(model, realm=realm)
 
     representative = POOL.pick(realm=realm) if POOL else None
@@ -4199,6 +4259,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, info)
         if path == "/realm":
             return self._json(200, {"current": CURRENT_REALM,
+                                    "mode": REALM_MODE,
+                                    "preferred": REALM_PREFERRED,
                                     "options": ["intl", "cn"]})
         if path in ("/v1/models", "/models"):
             if not self._authorized():
@@ -4659,10 +4721,18 @@ class Handler(BaseHTTPRequestHandler):
             clear_logs()
             return self._json(200, {"ok": True})
         if path == "/realm":
-            new_realm = payload.get("realm")
-            if new_realm in ("intl", "cn"):
-                save_persisted_realm(new_realm)
+            # 支持 {"mode": intl|cn|both, "preferred": intl|cn}；
+            # 旧客户端 {"realm": intl|cn} 仍可用（等价于单区模式）。
+            mode = payload.get("mode")
+            if mode is None:
+                mode = payload.get("realm")
+            if str(mode or "").strip().lower() not in ("intl", "cn", "both"):
+                return self._error(400, "mode must be intl / cn / both",
+                                   "invalid_request_error")
+            save_persisted_realm(mode, payload.get("preferred"))
             return self._json(200, {"ok": True, "current": CURRENT_REALM,
+                                    "mode": REALM_MODE,
+                                    "preferred": REALM_PREFERRED,
                                     "persisted": True})
         if path == "/accounts/checkin":
             uid = payload.get("uid")
@@ -4899,7 +4969,9 @@ class Handler(BaseHTTPRequestHandler):
                sorted(custom_names) or "-"))
         holder = {"usage": None, "custom_names": custom_names}
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            # None = 未显式绑定出口：交给 open_upstream 按面板模式路由
+            #（双区=优先出口失效时自动切换）
+            req_realm = self._request_realm()
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -5100,7 +5172,9 @@ class Handler(BaseHTTPRequestHandler):
             % (model, effort, want_stream,
                len(payload.get("messages") or [])))
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            # None = 未显式绑定出口：交给 open_upstream 按面板模式路由
+            #（双区=优先出口失效时自动切换）
+            req_realm = self._request_realm()
             blocked = self._cross_realm_error(model, req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -5408,9 +5482,12 @@ def main():
     log("credential : %s" % (rep.path if rep else "-"))
     log("account    : %s @ %s" % (rep.uid if rep else "-",
                                   rep.domain if rep else "-"))
-    log("realm      : %s (%s)" % (
-        CURRENT_REALM,
-        "qoder.com" if CURRENT_REALM == "intl" else "qoder.com.cn"))
+    if REALM_MODE == "both":
+        log("realm      : both (优先 %s，失效自动切换另一区)" % REALM_PREFERRED)
+    else:
+        log("realm      : %s (%s)" % (
+            CURRENT_REALM,
+            "qoder.com" if CURRENT_REALM == "intl" else "qoder.com.cn"))
     log("catalog    : %s" % (BASEPROMPT_PATH if BASEPROMPT
                              else "baseprompt.json MISSING"))
 

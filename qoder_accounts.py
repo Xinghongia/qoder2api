@@ -536,6 +536,25 @@ class Account(object):
             return True
         return self.refresh()
 
+    def quota_depleted(self):
+        """额度快照是否已知耗尽——调度时降为后备档（不排除使用）。
+
+        只有明确的信号才算：isQuotaExceeded=True，或"总额度>0 且余额=0"。
+        快照可能过期（官方额度刷新/签到到账后有延迟），所以这只是一个
+        排序偏好：后备档在主档全部不可用时照常顶上，不会把账号判死。
+        """
+        c = self.credits or {}
+        if not c:
+            return False
+        if c.get("exceeded") is True:
+            return True
+        try:
+            remain = float(c.get("remain") or 0)
+            size = float(c.get("size") or 0)
+        except (TypeError, ValueError):
+            return False
+        return remain <= 0 and size > 0
+
     def note_error(self, message, cooldown=60, single_account=False, model=None, until=None):
         self.last_error = str(message)[:200]
         if model:
@@ -1335,6 +1354,12 @@ class AccountPool(object):
         return account
 
     def pick(self, realm=None, exclude=None, model=None):
+        """轮询选择一个账号：额度未耗尽的一档优先，耗尽/未知为后备档。
+
+        两档内都沿用轮询游标（均摊负载），并跳过禁用/冷却中/该模型频控中
+        的账号。会话粘性（同一对话固定账号以命中上游 prompt 缓存）由
+        pick_for_session 在此之上处理。
+        """
         exclude = exclude or set()
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
@@ -1342,16 +1367,20 @@ class AccountPool(object):
         total = len(snapshot)
         if total == 0:
             return None
+        ready_list = []
         for offset in range(total):
-            index = (start + offset) % total
-            account = snapshot[index]
+            account = snapshot[(start + offset) % total]
             if account.uid in exclude:
                 continue
             if account.ready(model=model):
-                with self._lock:
-                    self._cursor = (index + 1) % total
-                return account
-        return None
+                ready_list.append(account)
+        if not ready_list:
+            return None
+        primary = [a for a in ready_list if not a.quota_depleted()]
+        account = (primary or ready_list)[0]
+        with self._lock:
+            self._cursor = (snapshot.index(account) + 1) % total
+        return account
 
     def representative(self, realm=None):
         with self._lock:
