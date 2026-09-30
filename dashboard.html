@@ -379,7 +379,7 @@ a:hover{text-decoration:underline}
   <section>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <h2 style="margin:0">当前版本模型库与能力清单 <em id="availModelCount"></em></h2>
-      <div style="font-size:12px;color:var(--dim)">与官方桌面版一致：官方全部对话模型（含未开通套餐项及官方原因）、官方模型名与介绍、峰谷价、上下文窗口、推理/视觉能力与思考档位</div>
+      <div style="font-size:12px;color:var(--dim)">与官方桌面版一致：官方全部对话模型（含未开通套餐项及官方原因）、官方模型名与介绍、峰谷价、上下文窗口、推理/视觉能力与思考档位。<b>上下文窗口与思考档位两列可直接改</b>（存为该模型默认值，客户端请求里带了值时以客户端为准）</div>
     </div>
     <div style="overflow-x:auto">
       <table id="modelsTable">
@@ -552,7 +552,8 @@ a:hover{text-decoration:underline}
         <div>
           <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
           <div style="font-size:12px;color:var(--dim);margin-top:4px">
-            为每个 Key 绑定专属出口。客户端使用该 Key 请求将固定走对应区域，实现双出口并发。
+            每个 Key 可绑定专属出口。未绑定的 Key 跟随网关出口模式（双区 = 优先区失效自动切换）；
+            绑定后的 Key 固定走该出口、不参与失效切换，适合给不同客户端分派固定区域。
           </div>
         </div>
         <button onclick="addApiKeyRow()">+ 添加 API Key</button>
@@ -854,6 +855,7 @@ window.VIEW_REALM = "intl";
 window.REALM_FILTER = "all";
 window.MODELS_DATA = [];
 window.ACCOUNTS = [];
+window.MODEL_OVERRIDES = {};   // {realm:key: {context_window, effort}}
 
 function updateUI(){
   const isIntlView = (window.VIEW_REALM === "intl");
@@ -902,10 +904,15 @@ function updateUI(){
 
   // 计算当前绑定与生效的 Key 数量
   const keys = (typeof API_KEY_ROWS !== 'undefined' && API_KEY_ROWS.length) ? API_KEY_ROWS : (window.API_KEY_ROWS || []);
-  const intlKeys = keys.filter(k => k.enabled !== false && k.realm === 'intl').length;
-  const cnKeys = keys.filter(k => k.enabled !== false && k.realm === 'cn').length;
-  const followKeys = keys.filter(k => k.enabled !== false && !k.realm).length;
-  const activeKeysTotal = isIntlGw ? (intlKeys + followKeys) : (cnKeys + followKeys);
+  const enabledKeys = keys.filter(k => k.enabled !== false);
+  const intlKeys = enabledKeys.filter(k => k.realm === 'intl').length;
+  const cnKeys = enabledKeys.filter(k => k.realm === 'cn').length;
+  const followKeys = enabledKeys.filter(k => !k.realm).length;
+  // 双区模式下每个 Key 都生效（未绑定者两区都能服务，绑定者固定一区）；
+  // 单区模式下绑定到另一区的 Key 收不到流量，不计入。
+  const activeKeysTotal = bothMode
+    ? enabledKeys.length
+    : (isIntlGw ? (intlKeys + followKeys) : (cnKeys + followKeys));
 
   const elGwKeyBadge = document.getElementById("activeGatewayKeyCount");
   if(elGwKeyBadge) elGwKeyBadge.textContent = activeKeysTotal + ' 个 Key 生效';
@@ -967,6 +974,8 @@ async function setRealmMode(value){
     toast("网关出口已保存并生效: " + realmModeText(window.ACTIVE_GATEWAY_MODE, window.ACTIVE_GATEWAY_PREFERRED));
     window.VIEW_REALM = window.ACTIVE_GATEWAY_REALM;
     window.updateUI();
+    // Key 卡片的「跟随网关出口」文案要跟着新模式刷新（编辑中的行不动，避免丢输入）
+    if(typeof API_KEY_ROWS !== 'undefined' && !API_KEY_ROWS.some(r => r._editing)) renderKeyRows();
     await loadAccounts();
     await loadModels();
     await loadGrowthTasks();
@@ -1099,17 +1108,35 @@ function renderAvailableModels(){
       return k >= 1000 ? (k / 1000) + 'M' : k + 'K';
     };
 
-    // 3. 上下文窗口（官方 context_config 多窗口，默认窗口加粗）
+    // 每模型默认设置（上下文窗口 / 思考档位）：存 accounts/settings.json，
+    // 客户端请求里带了值时以客户端为准，这里只是「没带时的默认」。
+    const ovKey = (window.VIEW_REALM || 'cn') + ':' + (m.upstream_key || m.id);
+    const mOverride = (window.MODEL_OVERRIDES || {})[ovKey] || {};
+    const selStyle = 'background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:4px 8px;font-size:12px;color:var(--fg);max-width:100%';
+
+    // 3. 上下文窗口（官方 context_config 多窗口；可改为该模型的默认窗口）
     let ctx = '-';
-    if(m.context_window_labels && m.context_window_labels.length){
-      const dflt = m.context_window_default;
-      ctx = m.context_window_labels.map(l => (String(l) === String(dflt))
-        ? '<b>' + esc(l) + '</b>'
-        : '<span style="color:var(--dim)">' + esc(l) + '</span>').join(' / ');
-    } else if(m.context_windows && m.context_windows.length){
-      ctx = '<b>' + m.context_windows.map(fmtK).join(' / ') + '</b>';
+    if(m.context_windows && m.context_windows.length){
+      const labels = (m.context_window_labels && m.context_window_labels.length === m.context_windows.length)
+        ? m.context_window_labels : m.context_windows.map(fmtK);
+      const curWin = mOverride.context_window ? String(mOverride.context_window) : '';
+      const winList = m.context_windows.slice();
+      if(curWin && winList.indexOf(Number(curWin)) < 0) winList.unshift(Number(curWin));
+      const winOpts = ['<option value="">跟随官方默认</option>'].concat(
+        winList.map(w => '<option value="' + w + '"'
+          + (String(w) === curWin ? ' selected' : '') + '>'
+          + esc((labels.indexOf(w) >= 0 ? labels[labels.indexOf(w)] : fmtK(w)))
+          + '</option>')
+      ).join('');
+      ctx = '<div><select style="' + selStyle + '" onchange="saveModelOverride(this, \''
+        + esc(ovKey) + '\', \'context_window\')">' + winOpts + '</select></div>'
+        + '<div style="font-size:10px;margin-top:2px;color:'
+        + (curWin ? 'var(--think)' : 'var(--dim)') + '">'
+        + (curWin ? '已自定义（官方默认 ' + esc(m.context_window_default || labels[0] || '-') + '）'
+                  : '可选 ' + esc(labels.join(' / '))) + '</div>';
     } else if(m.context_length){
-      ctx = '<b>' + fmtK(m.context_length) + '</b>';
+      ctx = '<b>' + fmtK(m.context_length) + '</b>'
+        + '<div style="font-size:10px;color:var(--dim);margin-top:2px">官方单窗口</div>';
     }
 
     // 4. 思考档位（官方 thinking_config，默认档位标注）
@@ -1122,11 +1149,21 @@ function renderAvailableModels(){
     };
     if(m.reasoning_fixed_effort){
       effort = renderEffortBadge(m.reasoning_fixed_effort);
-    } else if(m.reasoning_efforts && m.reasoning_efforts.length){
-      effort = m.reasoning_efforts.map(renderEffortBadge).join(' ');
-      if(m.reasoning_can_disable){
-        effort += ' <span class="badge-effort" style="background:rgba(120,120,140,.1);color:var(--dim);border-color:rgba(120,120,140,.3)" title="thinking_config.disabled">可关闭</span>';
-      }
+    } else if((m.reasoning_efforts && m.reasoning_efforts.length)
+              || m.reasoning_can_disable){
+      // 官方支持表里的档位 + （可关闭时）none；空 = 跟随官方默认
+      const eList = (m.reasoning_efforts || []).slice();
+      if(m.reasoning_can_disable && eList.indexOf('none') < 0) eList.push('none');
+      const curEff = mOverride.effort || '';
+      const effOpts = ['<option value="">跟随官方默认</option>'].concat(
+        eList.map(e => '<option value="' + esc(e) + '"'
+          + (String(curEff).toLowerCase() === e ? ' selected' : '') + '>' + esc(e) + '</option>')
+      ).join('');
+      effort = '<div><select style="' + selStyle + '" onchange="saveModelOverride(this, \''
+        + esc(ovKey) + '\', \'effort\')">' + effOpts + '</select></div>'
+        + '<div style="font-size:10px;margin-top:2px;color:'
+        + (curEff ? 'var(--think)' : 'var(--dim)') + '">'
+        + (curEff ? '已自定义' : '可选 ' + esc(eList.join(' / '))) + '</div>';
     } else if(m.supports_reasoning){
       effort = '<span class="badge-effort">原生</span>';
     }
@@ -1161,6 +1198,28 @@ function renderAvailableModels(){
       + '<td style="text-align:left">' + effort + '</td>'
       + '</tr>';
   }).join('');
+}
+
+/* 模型库「上下文窗口 / 思考档位」下拉 → 保存为该模型的默认值。
+   空值 = 恢复跟随官方默认；客户端请求里带了值时仍以客户端为准。 */
+async function saveModelOverride(sel, ovKey, field){
+  const value = (sel && sel.value != null) ? String(sel.value).trim() : '';
+  if(sel) sel.disabled = true;
+  try{
+    const patch = {};
+    patch[ovKey] = {};
+    patch[ovKey][field] = value;
+    const r = await postJSON('/settings/save', {model_overrides: patch});
+    window.MODEL_OVERRIDES = r.model_overrides || window.MODEL_OVERRIDES;
+    toast(value ? ('已保存默认（' + (field === 'context_window' ? '窗口 ' + value : '档位 ' + value) + '），客户端未指定时生效')
+                : '已恢复跟随官方默认', 'ok');
+    renderAvailableModels();
+  }catch(e){
+    toast('保存失败: ' + e.message, 'bad');
+    renderAvailableModels();
+  }finally{
+    if(sel) sel.disabled = false;
+  }
 }
 
 let CURRENT_GROWTH_UID = 'all';
@@ -2465,6 +2524,8 @@ async function loadSettings(showToast){
     }));
     window.API_KEY_ROWS = API_KEY_ROWS;
     renderKeyRows();
+    // 每模型默认（上下文窗口 / 思考档位），供模型库两列渲染
+    window.MODEL_OVERRIDES = data.model_overrides || {};
     updateUI();
     // 网络代理（三档：跟随系统 / 手动 / 直连）
     const prox = data.proxy || {};
@@ -2543,11 +2604,28 @@ function randomKeyValue(){
   return raw || ('wb-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
 }
 
-const REALM_CHOICES = [
-  ['', '跟随面板切换'],
-  ['intl', '固定国际版出口'],
-  ['cn', '固定国内版出口'],
-];
+/* 出口绑定选项：文案随网关出口模式（ACTIVE_GATEWAY_MODE / PREFERRED）实时生成，
+   未绑定 = 跟随网关出口（双区模式下优先区失效自动切换）。 */
+function realmChoices(){
+  const mode = window.ACTIVE_GATEWAY_MODE || window.ACTIVE_GATEWAY_REALM || 'cn';
+  const pref = window.ACTIVE_GATEWAY_PREFERRED || window.ACTIVE_GATEWAY_REALM || mode;
+  const follow = mode === 'both'
+    ? '跟随网关出口（双区 · 优先' + (pref === 'intl' ? '国际版' : '国内版') + '，失效自动切换）'
+    : '跟随网关出口（仅' + (mode === 'intl' ? '国际版' : '国内版') + '）';
+  return [
+    ['', follow],
+    ['intl', '固定国际版出口（不自动切换）'],
+    ['cn', '固定国内版出口（不自动切换）'],
+  ];
+}
+
+function realmFollowBadge(){
+  const mode = window.ACTIVE_GATEWAY_MODE || window.ACTIVE_GATEWAY_REALM || 'cn';
+  const pref = window.ACTIVE_GATEWAY_PREFERRED || window.ACTIVE_GATEWAY_REALM || mode;
+  return mode === 'both'
+    ? '跟随网关出口 · 双区优先' + (pref === 'intl' ? '国际版' : '国内版')
+    : '跟随网关出口 · 仅' + (mode === 'intl' ? '国际版' : '国内版');
+}
 
 function renderKeyRows(){
   const box = document.getElementById('keyList');
@@ -2558,7 +2636,7 @@ function renderKeyRows(){
   }
   box.innerHTML = API_KEY_ROWS.map((row, i) => {
     if(row._editing){
-      const options = REALM_CHOICES.map(([val, lbl]) =>
+      const options = realmChoices().map(([val, lbl]) =>
         '<option value="' + val + '"' + ((row.realm || '') === val ? ' selected' : '') + '>' + lbl + '</option>'
       ).join('');
       return '<div class="key-card" style="border-color:var(--accent);background:#ffffff;box-shadow:0 0 0 1px var(--accent), var(--shadow-md)">'
@@ -2599,10 +2677,20 @@ function renderKeyRows(){
       : '<span class="badge off" style="font-size:11px;font-weight:600;padding:2px 10px">已禁用</span>';
 
     const realmBadge = (row.realm === 'intl')
-      ? '<span class="realm-badge-intl" style="font-size:11px">固定国际版出口</span>'
+      ? '<span class="realm-badge-intl" style="font-size:11px">固定国际版出口 · 不自动切换</span>'
       : (row.realm === 'cn')
-      ? '<span class="realm-badge-cn" style="font-size:11px">固定国内版出口</span>'
-      : '<span class="badge s" style="font-size:11px">跟随面板切换</span>';
+      ? '<span class="realm-badge-cn" style="font-size:11px">固定国内版出口 · 不自动切换</span>'
+      : '<span class="badge s" style="font-size:11px">' + esc(realmFollowBadge()) + '</span>';
+    // 绑定的区域一个账号都没有 → 该 Key 必然 503，卡片上直接给出警示
+    const realmReady = {'intl': 0, 'cn': 0};
+    (window.ACCOUNTS || []).forEach(a => {
+      const r2 = a.realm === 'cn' ? 'cn' : 'intl';
+      realmReady[r2] += 1;
+    });
+    const realmMissing = (row.realm && (window.ACCOUNTS || []).length
+                          && !realmReady[row.realm])
+      ? '<span class="badge off" style="font-size:11px">该区域暂无账号</span>'
+      : '';
 
     const displayKey = row.masked || (row.key ? (row.key.slice(0, 4) + '******' + row.key.slice(-4)) : '未设置');
     const createdStr = row.created_at ? ('创建时间 ' + esc(row.created_at)) : '';
@@ -2614,6 +2702,7 @@ function renderKeyRows(){
       +       '<span style="font-size:15px;font-weight:700;color:var(--fg)">' + esc(row.name || '未命名') + '</span>'
       +       statusBadge
       +       realmBadge
+      +       realmMissing
       +     '</div>'
       +     '<div style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
       +       '<span>Key: <span class="mono" style="color:var(--fg);font-weight:500">' + esc(displayKey) + '</span></span>'

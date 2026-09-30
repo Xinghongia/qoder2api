@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.1.6-2496ED?style=flat-square" alt="Version 1.1.6">
+  <img src="https://img.shields.io/badge/Release-v1.1.8-2496ED?style=flat-square" alt="Version 1.1.8">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -90,9 +90,9 @@
 
 - **添加与在线生成**：看板「设置」页，输入名称 + 一键生成随机 Key；
 - **出口自由绑定**：
-  - 🌐 **国际版出口**：该 Key 流量强制走 `api1.qoder.sh`（连不上自动切 api2/api3）
-  - 🇨🇳 **国内版出口**：该 Key 流量强制走 `gateway.qoder.com.cn`
-  - **跟随面板切换**：未绑定出口的 Key 实时跟随看板顶部全局出口
+  - 🌐 **固定国际版出口**：该 Key 流量强制走 `api1.qoder.sh`（连不上自动切 api2/api3），不参与区域失效切换
+  - 🇨🇳 **固定国内版出口**：该 Key 流量强制走 `gateway.qoder.com.cn`，不参与区域失效切换
+  - **跟随网关出口（默认）**：未绑定出口的 Key 实时跟随看板顶部出口模式——单区 = 该区；双区 = 优先区失效自动切换另一区
 - **状态管理**：单独启停、一键删除，删除即刻失效；配置持久化到 `accounts/settings.json`；
 - **安全防冲突**：面板配置过 Key 后，启动脚本里的旧 `--api-key` 自动失效；
 - **模型区域自检**：Key 出口与模型区域不匹配时返回通俗 400，杜绝上游晦涩拒流报错。
@@ -160,6 +160,14 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 | `qmodel`（Qwen3.7-Plus） | 无档位（仅开/关） | — | 任何档位都被忽略（只有 `none` 能关掉思考） |
 
 网关现在按**官方目录里该模型的档位表**归一化（`normalize_reasoning_effort()`）：命中原样透传；未命中取"最近的合法档位"（同距时偏向该模型默认档，如 `dfmodel` 的 `medium→high`、`xhigh→max`，`qfmodel` 的 `high→medium`、`max→xhigh`），并在日志标注；模型**有 thinking_config 但无档位表**时不再下发无效档位（只保留 `none`）；模型**完全没有 thinking_config**（如路由器 `auto`）则原样透传，不做猜测。`/v1/models` 的 `reasoning_efforts` / `reasoning_default_effort` 字段即为该模型的合法档位与默认档。另兼容 `reasoning.effort` 与 `thinking.effort/level` 三种客户端写法。
+
+**思考预算与开关（v1.1.8，对齐官方 CLI 1.1.62）**：第三方客户端（Claude Code / Cline / 各家 SDK）常见三种写法全部识别——
+
+- **思考预算**：`thinking.budget_tokens` / `reasoning.budget_tokens` / `thinking_budget`（Anthropic 风格），按官方阈值表换算成档位：`0→none`、`≤1024→low`、`≤8192→medium`、`≤24576→high`、`≤49152→xhigh`、`>49152→max`，再走档位表归一化；
+- **开关**：`enable_thinking: false` / `thinking.type: "disabled"` → 下发 `reasoning_effort=none`，并同步官方的 `parameters.enable_thinking=false` 与 `model_config.is_reasoning=false`；开思考时下发 `enable_thinking=true`，带预算时一并透传 `reasoning_budget_tokens`（与官方 SDK 逐字段一致）；
+- **上下文窗口**：请求里带 `context_window`（token 数或 `"1M"`/`"400K"` 标签）、`context_window_tokens`、`context_length` 任一即可指定本次请求的上下文窗口，校验通过后以官方字段 `parameters.context_length` 下发；不在官方窗口表内时取**最接近的合法窗口**并在日志标注（官方 CLI 是直接丢弃回默认，这里让客户端意图尽量达成）。
+
+**看板模型库可改默认值（v1.1.8）**：`上下文窗口`、`思考档位` 两列现在是下拉框——每个模型（`<区>:<上游 key>` 维度，两区独立）可以存一份**默认值**（`accounts/settings.json` 的 `model_overrides`），客户端请求里没带对应字段时生效；选「跟随官方默认」即恢复。客户端请求里带了值时**永远以客户端为准**。单窗口模型也给出可选窗口（官方 `WX()` 推导的 128K/200K/上限）。
 
 ```
 客户端 OpenAI 请求
@@ -354,6 +362,24 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.1.8
+
+**新增：模型库上下文窗口 / 思考档位可改 + 客户端思考参数全识别（对齐官方 CLI 1.1.62）**
+- **看板「模型库」两列直接改**：`上下文窗口`、`思考档位` 变下拉框，按 `<区>:<上游 key>` 存入 `accounts/settings.json` 的 `model_overrides`（两区独立），「跟随官方默认」即恢复；这是**默认值**——客户端请求里带了对应字段时永远以客户端为准；
+- **思考预算识别**：`thinking.budget_tokens` / `thinking_budget` / `reasoning_budget_tokens`（Anthropic 风格）按官方阈值表换算档位（`0→none`、`≤1024→low`、`≤8192→medium`、`≤24576→high`、`≤49152→xhigh`、`>49152→max`）再归一化；
+- **思考开关识别**：`enable_thinking: false` / `thinking.type=disabled` → `reasoning_effort=none`，并逐字段镜像官方下发 `parameters.enable_thinking`、`parameters.reasoning_budget_tokens`、`model_config.is_reasoning=false`；
+- **上下文窗口识别**：请求带 `context_window`（token 数或 `"1M"` 标签）/ `context_length` 即可指定，校验后以官方字段 `parameters.context_length` 下发，越界取最接近的合法窗口并记日志；单窗口模型也给可选项（官方 `WX()` 推导 128K/200K/上限）；
+- 优先级：**客户端请求 > 看板每模型默认 > 官方默认档/窗口**。
+
+### v1.1.7
+
+**优化：API Key 出口绑定与出口模式对齐**
+- **语义明确**：未绑定出口的 Key = 跟随网关出口模式（单区 = 该区；双区 = 优先区失效自动切换）；绑定到某区的 Key 保持**严格固定、不参与失效切换**（区域独占模型仍按归属自动路由）。
+- **设置页实时跟随**：出口下拉与 Key 卡片徽标直接显示当前跟随目标（如「跟随网关出口 · 双区优先国内」），文案随网关模式变化即时刷新；固定出口选项标注「不自动切换」。若绑定的区域当前没有账号，Key 卡片给出「该区域暂无账号」警示。
+- **`/v1/models` 口径修正**：未绑定出口（未带 `?realm=` / `X-Realm`）的请求按网关出口模式返回——双区模式返回**两区模型并集**（每条带 `realm` / `realms` 标注，共享模型为 `both`），此前只返回优先区清单，客户端发现不了另一区的模型；非法 `?realm=` 值不再返回空清单。
+- **看板统计修正**：双区模式下「N 个 Key 生效」统计全部启用 Key（此前只算优先区绑定 + 跟随，漏算另一区绑定的 Key）。
+- **报错更直白**：绑定 Key 的出口没有可用账号时，503 直接说明「固定走X区、Y区仍有可用账号，改为『跟随网关出口』即可自动切换」；Key 与模型区域错配的 400 提示同步更新。
 
 ### v1.1.6
 

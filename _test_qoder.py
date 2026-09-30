@@ -2199,5 +2199,221 @@ finally:
     _sh23.rmtree(_TD23, ignore_errors=True)
 
 print()
+print("[24] api-key exit binding vs. gateway mode (/v1/models union)")
+
+# 并集合并：按上游 key 去重、先出现的区域优先；共享模型标注 both + realms
+_part_i = [("shared", {"name": "Shared (Intl)"}), ("intlonly", {"name": "Intl Only"})]
+_part_c = [("shared", {"name": "Shared (Cn)"}), ("cnonly", {"name": "Cn Only"})]
+_union = P.union_model_entries([("intl", _part_i), ("cn", _part_c)])
+_umap = dict(_union)
+check("union keeps first-seen order and drops duplicates",
+      [m for m, _ in _union] == ["shared", "intlonly", "cnonly"],
+      [m for m, _ in _union])
+check("shared model annotated as both realms",
+      _umap["shared"]["realm"] == "both"
+      and _umap["shared"]["realms"] == ["intl", "cn"], _umap["shared"])
+check("realm-exclusive entries keep their own realm",
+      _umap["intlonly"]["realm"] == "intl"
+      and _umap["cnonly"]["realm"] == "cn")
+check("per-realm entries are not mutated (fetch_models cache stays clean)",
+      "realm" not in _part_i[0][1] and "realms" not in _part_c[0][1])
+_me_u = P.model_entry("shared", _umap["shared"])
+check("model_entry surfaces realm/realms passthrough",
+      _me_u.get("realm") == "both" and _me_u.get("realms") == ["intl", "cn"])
+
+# fetch_models("both") 端到端：假的按区目录，不碰网络
+_orig_cache24 = dict(P._models_cache)
+_orig_dyn24 = P.read_dynamic_models
+_orig_local24 = P.read_local_models
+_orig_mode24 = (P.REALM_MODE, P.REALM_PREFERRED)
+P.read_dynamic_models = lambda realm=None: []
+P.read_local_models = lambda realm=None: (
+    [("shared", {"name": "Shared"}), ("intlonly", {"name": "Intl Only"})]
+    if realm == "intl" else
+    [("shared", {"name": "Shared"}), ("cnonly", {"name": "Cn Only"})])
+try:
+    P._models_cache.clear()
+    P.REALM_MODE, P.REALM_PREFERRED = "both", "intl"
+    _got24 = P.fetch_models(realm="both")
+    _gmap24 = dict(_got24)
+    check("fetch_models('both') merges both realm catalogs once",
+          sorted(_gmap24) == ["cnonly", "intlonly", "shared"], sorted(_gmap24))
+    check("fetch_models('both') marks shared + exclusive realms",
+          _gmap24["shared"].get("realms") == ["intl", "cn"]
+          and _gmap24["cnonly"].get("realm") == "cn")
+finally:
+    P.read_dynamic_models = _orig_dyn24
+    P.read_local_models = _orig_local24
+    P.REALM_MODE, P.REALM_PREFERRED = _orig_mode24
+    P._models_cache.clear()
+    P._models_cache.update(_orig_cache24)
+
+print()
+print("[25] model library: context windows + thinking per official protocol")
+
+# 预算 -> 档位（官方 CLI JX() 阈值）
+_jx = [("none", P.effort_from_budget(0)), ("low", P.effort_from_budget(1024)),
+       ("medium", P.effort_from_budget(8192)), ("high", P.effort_from_budget(24576)),
+       ("xhigh", P.effort_from_budget(49152)), ("max", P.effort_from_budget(49153))]
+check("thinking budget -> effort follows official thresholds",
+      all(got == want for want, got in _jx), _jx)
+check("non-numeric budget is rejected",
+      P.effort_from_budget("big") == "" and P.effort_from_budget(None) == "")
+
+# 可选窗口：context_config 优先，缺失时按 [128K, 200K, max] 推导（官方 WX）
+_meta_cfg = {"context_config": {"200K": {"token_count": 200000, "is_default": True},
+                                "400K": {"token_count": 400000},
+                                "1M": {"token_count": 1000000}},
+             "max_input_tokens": 180000}
+check("windows come from context_config",
+      P.available_context_windows(_meta_cfg) == [200000, 400000, 1000000])
+check("a model without a window table declares none",
+      P.available_context_windows({"max_input_tokens": 300000}) == [])
+check("display options derived from max_input_tokens (official WX)",
+      P.window_choices({"max_input_tokens": 300000})
+      == [128000, 200000, 300000])
+check("single-window model only offers its own window",
+      P.window_choices({"max_input_tokens": 100000}) == [100000])
+check("jX validation: listed only (or <= max without a list)",
+      P.window_supported(_meta_cfg, 400000)
+      and not P.window_supported(_meta_cfg, 300000)
+      and P.window_supported({"max_input_tokens": 100000}, 90000)
+      and not P.window_supported({"max_input_tokens": 100000}, 200000))
+_v25, _n25 = P.resolve_context_window(_meta_cfg, "1M")
+check("window labels resolve to token counts", _v25 == 1000000, _v25)
+_v25b, _n25b = P.resolve_context_window(_meta_cfg, 300000)
+check("unsupported window rounds to the nearest supported one",
+      _v25b == 400000 and _n25b, _n25b)
+check("invalid window is ignored, not sent",
+      P.resolve_context_window(_meta_cfg, "huge")[0] is None)
+check("no window requested -> nothing sent",
+      P.resolve_context_window(_meta_cfg, None) == (None, ""))
+
+# 客户端思考意图提取：档位 / 预算 / 开关
+check("reasoning_effort passthrough",
+      P.client_thinking({"reasoning_effort": "HIGH"})["effort"] == "high")
+check("Anthropic-style thinking budget",
+      P.client_thinking({"thinking": {"type": "enabled",
+                                       "budget_tokens": 6000}})["budget"] == 6000)
+check("enable_thinking / type=disabled both mean off",
+      P.client_thinking({"enable_thinking": False})["disable"] is True
+      and P.client_thinking({"thinking": {"type": "disabled"}})["disable"] is True)
+check("thinking_budget alias read",
+      P.client_thinking({"thinking_budget": 20000})["budget"] == 20000)
+
+# 请求体：档位+开关+预算随 effort 下发，窗口以 context_length 下发
+_th_body = P.build_qoder_body({
+    "model": "qmodel_38max",
+    "messages": [{"role": "user", "content": "hi"}],
+    "thinking": {"type": "enabled", "budget_tokens": 6000},
+}, None, "qmodel_38max", realm="cn")
+_thp = _th_body["parameters"]
+check("budget 6000 -> medium on qmodel_38max",
+      _thp.get("reasoning_effort") == "medium", _thp)
+check("official enable_thinking + budget fields mirror the choice",
+      _thp.get("enable_thinking") is True
+      and _thp.get("reasoning_budget_tokens") == 6000, _thp)
+_off_body = P.build_qoder_body({
+    "model": "qmodel_38max",
+    "messages": [{"role": "user", "content": "hi"}],
+    "enable_thinking": False,
+}, None, "qmodel_38max", realm="cn")
+check("explicit disable sends reasoning_effort=none + enable_thinking=false",
+      _off_body["parameters"].get("reasoning_effort") == "none"
+      and _off_body["parameters"].get("enable_thinking") is False)
+check("thinking off flips model_config.is_reasoning",
+      _off_body["model_config"].get("is_reasoning") is False)
+_win_body = P.build_qoder_body({
+    "model": "qmodel_38max",
+    "messages": [{"role": "user", "content": "hi"}],
+    "context_window": 400000,
+}, None, "qmodel_38max", realm="cn")
+check("valid window choice goes out as parameters.context_length",
+      _win_body["parameters"].get("context_length") == 400000,
+      _win_body["parameters"])
+_win_off = P.build_qoder_body({
+    "model": "qmodel_38max",
+    "messages": [{"role": "user", "content": "hi"}],
+    "context_window": 300000,
+}, None, "qmodel_38max", realm="cn")
+check("unsupported window rounds, still uses an official window",
+      _win_off["parameters"].get("context_length") == 400000,
+      _win_off["parameters"])
+
+# 看板每模型默认：客户端没带时生效，带了以客户端为准
+_orig_dir25b = P.ACCOUNTS_DIR
+_orig_state25 = os.path.join(os.environ["ACCOUNTS_DIR"], "settings.json")
+import shutil as _sh25
+if os.path.isfile(_orig_state25):
+    _backup25 = _orig_state25 + ".testbak25"
+    _sh25.copyfile(_orig_state25, _backup25)
+else:
+    _backup25 = None
+try:
+    P.qoder_settings.set_model_override(P.ACCOUNTS_DIR, "cn:qmodel_38max",
+                                        context_window=400000, effort="low")
+    check("override stored in settings",
+          P.qoder_settings.model_overrides(P.ACCOUNTS_DIR)
+          .get("cn:qmodel_38max") == {"context_window": 400000, "effort": "low"})
+    _ov_body = P.build_qoder_body({
+        "model": "qmodel_38max",
+        "messages": [{"role": "user", "content": "hi"}],
+    }, None, "qmodel_38max", realm="cn")
+    check("model default applies when the client says nothing",
+          _ov_body["parameters"].get("context_length") == 400000
+          and _ov_body["parameters"].get("reasoning_effort") == "low",
+          _ov_body["parameters"])
+    _ov_win = P.build_qoder_body({
+        "model": "qmodel_38max",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "xhigh",
+    }, None, "qmodel_38max", realm="cn")
+    check("explicit client value beats the model default",
+          _ov_win["parameters"].get("reasoning_effort") == "xhigh",
+          _ov_win["parameters"])
+finally:
+    P.qoder_settings.set_model_override(P.ACCOUNTS_DIR, "cn:qmodel_38max",
+                                        context_window=0, effort="")
+    if _backup25:
+        _sh25.move(_backup25, _orig_state25)
+    P.ACCOUNTS_DIR = _orig_dir25b
+check("override removed again", not P.qoder_settings.model_overrides(
+    P.ACCOUNTS_DIR).get("cn:qmodel_38max"))
+
+print()
+print("[26] /settings/save model_overrides patch contract")
+import tempfile as _tf26
+_TD26 = _tf26.mkdtemp(prefix="qdov_")
+_orig_dir26 = P.ACCOUNTS_DIR
+P.ACCOUNTS_DIR = _TD26
+try:
+    _h26 = P.Handler.__new__(P.Handler)
+    _cap26 = {}
+    _h26._payload_or_error = lambda: {"model_overrides": {
+        "cn:qfmodel": {"context_window": "200000", "effort": "low"},
+        "intl:qfmodel": {"context_window": "", "effort": ""}}}
+    _h26._json = lambda code, obj: _cap26.update({"code": code, "obj": obj})
+    _h26._error = lambda code, msg, *a: _cap26.update({"err": code, "msg": msg})
+    _h26._handle_settings_save()
+    check("save handler returns 200 with the patch applied",
+          _cap26.get("code") == 200
+          and _cap26["obj"].get("model_overrides", {}).get("cn:qfmodel")
+          == {"context_window": 200000, "effort": "low"},
+          _cap26)
+    check("empty values remove an override entirely",
+          "intl:qfmodel" not in _cap26["obj"].get("model_overrides", {}),
+          _cap26["obj"].get("model_overrides"))
+    check("runtime settings view exposes model_overrides",
+          isinstance(_cap26["obj"].get("model_overrides"), dict))
+    _h26._payload_or_error = lambda: {"model_overrides": "nope"}
+    _h26._handle_settings_save()
+    check("non-object patch is rejected with 400",
+          _cap26.get("err") == 400, _cap26)
+finally:
+    P.ACCOUNTS_DIR = _orig_dir26
+    import shutil as _sh26
+    _sh26.rmtree(_TD26, ignore_errors=True)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

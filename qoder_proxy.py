@@ -52,7 +52,7 @@ from qoder_sign import qoder_encode, SESSIONS
 from qoder_accounts import get_realm_config, gateway_candidates, CLIENT_UA
 from pathlib import Path
 
-VERSION = "1.1.6"
+VERSION = "1.1.8"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 if CURRENT_REALM not in ("intl", "cn"):
@@ -1171,6 +1171,7 @@ def runtime_settings_view():
         "api_key_masked": masked,
         "auth_required": auth_required(),
         "api_keys": keys,
+        "model_overrides": qoder_settings.model_overrides(ACCOUNTS_DIR),
         "proxy": qoder_net.describe(),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
@@ -1439,17 +1440,53 @@ def read_local_models(realm=None):
     return []
 
 
+def union_model_entries(parts):
+    """合并两区模型清单：按上游 key 去重，标注每条可用的出口。
+
+    parts = [(realm, [(mid, meta), ...]), ...]，先出现的列表优先（首选区在前）。
+    共享模型 `realm="both"` 且 `realms` 列出两区；区域独占模型只带自身区域。
+    命中的 meta 一律复制，不污染 fetch_models 的按区缓存。
+    """
+    merged = {}
+    order = []
+    for realm, entries in parts:
+        for mid, meta in entries or []:
+            if mid not in merged:
+                item = dict(meta or {})
+                item["realm"] = realm
+                item["realms"] = [realm]
+                merged[mid] = item
+                order.append(mid)
+            else:
+                item = merged[mid]
+                if realm not in item["realms"]:
+                    item["realms"].append(realm)
+                item["realm"] = "both"
+    return [(mid, merged[mid]) for mid in order]
+
+
+def _fetch_models_both():
+    """双区出口模式下的并集清单：首选区在前，其次另一区。"""
+    first = REALM_PREFERRED if REALM_PREFERRED in ("intl", "cn") else "cn"
+    second = "cn" if first == "intl" else "intl"
+    return union_model_entries([(first, fetch_models(realm=first)),
+                                (second, fetch_models(realm=second))])
+
+
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
     with _lock:
         c = _models_cache.get(r) or {"at": 0.0, "data": None}
         if c["data"] and time.time() - c["at"] < 300:
             return c["data"]
-    # 1) 动态接口（需要账号） 2) 本机官方目录缓存 3) 内嵌静态快照
-    live = read_dynamic_models(realm=r)
-    if not live:
-        live = read_local_models(realm=r)
-    entries = merge_catalog(live, realm=r)
+    if r == "both":
+        entries = _fetch_models_both()
+    else:
+        # 1) 动态接口（需要账号） 2) 本机官方目录缓存 3) 内嵌静态快照
+        live = read_dynamic_models(realm=r)
+        if not live:
+            live = read_local_models(realm=r)
+        entries = merge_catalog(live, realm=r)
     with _lock:
         _models_cache[r] = {"at": time.time(), "data": entries}
     return entries
@@ -1575,6 +1612,12 @@ def model_entry(mid, meta):
         "upstream_key": mid,
         "enabled": meta.get("enable", True) is not False,
     }
+    # 双区并集清单（union_model_entries）会标注该模型可用的出口：
+    # 单区条目 `realm`，两区共享条目 `realm="both"` + `realms` 列表。
+    if meta.get("realms"):
+        item["realms"] = list(meta["realms"])
+    if meta.get("realm"):
+        item["realm"] = meta["realm"]
     item["name"] = display_name
     # 描述：来源自带动态/本地 description，否则取官方桌面版文案
     desc = meta.get("description") or ""
@@ -1659,6 +1702,21 @@ def model_entry(mid, meta):
         item["context_windows"] = windows
         item["context_window_labels"] = labels
         item["context_window_default"] = default_label
+    elif max_in:
+        # 官方没给多窗口表时，按官方 WX() 推导可选项（128K/200K/上限）：
+        # 此时上游只校验「不超过上限」，看板照样能选。
+        derived = window_choices(meta)
+        if derived:
+            def _win_label(v):
+                # 与官方版本一致用 1000 进制（200000 -> "200K"，不是 "195K"）
+                if v >= 1000000:
+                    return ("%g" % (v / 1000000)) + "M"
+                if v >= 1000:
+                    return ("%g" % (v / 1000)) + "K"
+                return str(v)
+            item["context_windows"] = derived
+            item["context_window_labels"] = [_win_label(v) for v in derived]
+            item["context_window_default"] = _win_label(derived[-1])
     # 最大输出：官方（catalog/动态接口）均无此字段——不输出、不展示（用户
     # 已确认不再测量该值）。
     max_out = meta.get("maxOutputTokens") or meta.get("max_output_tokens")
@@ -2039,10 +2097,166 @@ def normalize_reasoning_effort(effort, meta):
     return best, "unsupported level %s -> %s" % (e, best)
 
 
+# ---- 官方协议：上下文窗口 + 思考预算/档位（0.4.3 桌面端 / CLI 1.1.62） ----
+# 档位 ↔ 思考预算的官方换算表（CLI: Mvc / JX()）：
+EFFORT_BUDGET = {"none": 0, "low": 1024, "medium": 8192, "high": 24576,
+                 "xhigh": 49152, "max": 65536}
+EFFORT_BUDGET_STEPS = ((0, "none"), (1024, "low"), (8192, "medium"),
+                       (24576, "high"), (49152, "xhigh"))
+
+
+def effort_from_budget(value):
+    """思考预算（token 数）→ 官方档位（CLI: JX()）。非数字/缺省返回 ""。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return "none"
+    for ceiling, level in EFFORT_BUDGET_STEPS:
+        if n <= ceiling:
+            return level
+    return "max"
+
+
+def available_context_windows(meta):
+    """目录里声明的上下文窗口（token 数，去重后升序）。
+
+    优先官方 context_config 多窗口 → available_context_windows 字段。
+    推导出来的 128K/200K 不算"声明"，只用于 UI 选项（见 window_choices）。
+    """
+    meta = meta or {}
+    windows = []
+    ctx = meta.get("context_config")
+    if isinstance(ctx, dict):
+        for conf in ctx.values():
+            if isinstance(conf, dict) and conf.get("token_count"):
+                try:
+                    windows.append(int(conf["token_count"]))
+                except (TypeError, ValueError):
+                    pass
+    if not windows:
+        raw = meta.get("available_context_windows")
+        if isinstance(raw, (list, tuple)):
+            for w in raw:
+                try:
+                    w = int(w)
+                except (TypeError, ValueError):
+                    continue
+                if w > 0:
+                    windows.append(w)
+    return sorted(set(windows))
+
+
+def window_choices(meta):
+    """可展示的窗口选项：声明的表优先，否则按官方 WX() 推导。"""
+    wins = available_context_windows(meta)
+    if wins:
+        return wins
+    try:
+        top = int((meta or {}).get("max_input_tokens") or 0)
+    except (TypeError, ValueError):
+        top = 0
+    if top <= 0:
+        return []
+    return sorted({w for w in (128000, 200000, top) if w <= top})
+
+
+def window_supported(meta, want):
+    """官方 jX()：有声明表时必须命中表内值；无表时不得超过 max_input_tokens。"""
+    try:
+        want = int(want)
+    except (TypeError, ValueError):
+        return False
+    if want <= 0:
+        return False
+    wins = available_context_windows(meta)
+    if wins:
+        return want in wins
+    try:
+        top = int((meta or {}).get("max_input_tokens") or 0)
+    except (TypeError, ValueError):
+        top = 0
+    return top <= 0 or want <= top
+
+
+def resolve_context_window(meta, want):
+    """把请求/默认里的窗口值解析成可下发的 token 数。
+
+    支持 token 数或 "1M"/"400K" 标签；越界时取**不小于要求的最近窗口**
+    （官方是直接丢弃用默认，这里让客户端的意图尽量达成并记日志）。
+    返回 (value|None, note)：value=None 表示不下发 context_length。
+    """
+    if want in (None, ""):
+        return None, ""
+    text = str(want).strip().upper().replace("_", "")
+    if not text.isdigit():
+        mult = 1
+        # 官方目录标签是 1000 进制（"200K"=200000、"1M"=1000000）
+        if text.endswith("K"):
+            mult, text = 1000, text[:-1]
+        elif text.endswith("M"):
+            mult, text = 1000000, text[:-1]
+        try:
+            want = int(float(text) * mult)
+        except (TypeError, ValueError):
+            return None, "ignored (invalid context window: %s)" % want
+    want = int(want)
+    if want <= 0:
+        return None, ""
+    if window_supported(meta, want):
+        return want, ""
+    wins = available_context_windows(meta)
+    if not wins:
+        # 无声明表（max_input_tokens 为王）：原样下发，上游自己裁决
+        return want, ""
+    bigger = [w for w in wins if w >= want]
+    best = bigger[0] if bigger else wins[-1]
+    return best, "unsupported window %d -> %d" % (want, best)
+
+
+def client_thinking(payload):
+    """从请求里提取客户端的思考意图。
+
+    返回 {"effort": str, "budget": int|None, "disable": bool}。覆盖字段：
+      - 档位：reasoning_effort / reasoning.effort / thinking.effort|level
+      - 预算：thinking.budget_tokens / reasoning.budget_tokens /
+        thinking_budget / reasoning_budget_tokens（数字，官方 JX() 换算）
+      - 开关：enable_thinking=false / thinking.type=disabled /
+        reasoning.enabled=false（反向 enabled=true 且带预算走预算）
+    """
+    out = {"effort": "", "budget": None, "disable": False}
+    effort = payload.get("reasoning_effort")
+    reasoning = payload.get("reasoning") if isinstance(payload.get("reasoning"), dict) else {}
+    thinking = payload.get("thinking") if isinstance(payload.get("thinking"), dict) else {}
+    if not effort:
+        effort = reasoning.get("effort")
+    if not effort:
+        effort = thinking.get("effort") or thinking.get("level")
+    if effort:
+        out["effort"] = str(effort).strip().lower()
+    budget = thinking.get("budget_tokens")
+    if budget is None:
+        budget = thinking.get("budget")
+    if budget is None:
+        budget = reasoning.get("budget_tokens")
+    if budget is None:
+        budget = payload.get("thinking_budget") \
+            or payload.get("reasoning_budget_tokens")
+    if budget not in (None, ""):
+        try:
+            out["budget"] = int(budget)
+        except (TypeError, ValueError):
+            out["budget"] = None
+    th_type = str(thinking.get("type") or "").strip().lower()
+    if payload.get("enable_thinking") is False or th_type == "disabled" \
+            or reasoning.get("enabled") is False:
+        out["disable"] = True
+    return out
+
+
 def is_deepseek_model(model="", model_key=""):
     """判断这次请求最终打到的是不是一个 DeepSeek 上游模型。
-
-    必须同时看**上游 key**（dmodel / dfmodel）和客户端写的名字：
     客户端完全可能直接写 `dfmodel`/`dmodel`（仓库文档里就把 DeepSeek-Flash
     标为「内部 key：dfmodel」），而展示名是 `DeepSeek-Flash`。此前只按名字
     前缀 "deepseek" 判断，走 key 的请求拿不到 reasoning_content 兼容处理，
@@ -2358,6 +2572,43 @@ def build_qoder_body(payload, account, model_key, realm=None):
     mc["max_input_tokens"] = catalog_meta.get("max_input_tokens") or 180000
     body["model_config"] = mc
 
+    # ---- 思考 + 上下文窗口：客户端请求优先，其次看板里该模型的默认设置 ----
+    # 官方语义（CLI 1.1.62）：预算/档位先换算再按模型支持集合归一化；窗口
+    # 经官方校验后以 parameters.context_length 下发。
+    try:
+        model_override = qoder_settings.model_overrides(ACCOUNTS_DIR) \
+            .get("%s:%s" % (r, model_key)) or {}
+    except Exception:
+        model_override = {}
+    think = client_thinking(payload)
+    effort = think["effort"]
+    think_budget = think["budget"]
+    if think["disable"] and not effort:
+        effort = "none"
+    if not effort and think_budget is not None:
+        effort = effort_from_budget(think_budget)
+    if not effort and model_override.get("effort"):
+        effort = model_override["effort"]
+    effort_norm = None
+    if effort:
+        effort_norm, note = normalize_reasoning_effort(effort, catalog_meta)
+        if note:
+            log("reasoning_effort %s on '%s' (supported=%s)"
+                % (note, model_key or model, supported_efforts(catalog_meta)),
+                tag="chat")
+    if effort_norm == "none":
+        # 官方：思考关闭时同步把 model_config.is_reasoning 置 false
+        mc["is_reasoning"] = False
+    want_window = payload.get("context_window") \
+        or payload.get("context_window_tokens") \
+        or payload.get("context_length") \
+        or model_override.get("context_window")
+    ctx_len, window_note = resolve_context_window(catalog_meta, want_window)
+    if window_note:
+        log("context_window %s on '%s' (available=%s)"
+            % (window_note, model_key or model,
+               available_context_windows(catalog_meta)), tag="chat")
+
     # chat_context 高亮与模型配置副本
     cc = body.get("chat_context") or {}
     txt = cc.get("text") or {}
@@ -2374,7 +2625,7 @@ def build_qoder_body(payload, account, model_key, realm=None):
         body["image_urls"] = images
     body["chat_context"] = cc
 
-    # parameters：max_tokens / reasoning_effort
+    # parameters：max_tokens / 思考（档位 + 开关 + 预算）/ 上下文窗口
     params = body.get("parameters") or {}
     max_tokens = payload.get("max_tokens") or payload.get("max_completion_tokens")
     if max_tokens:
@@ -2382,20 +2633,18 @@ def build_qoder_body(payload, account, model_key, realm=None):
             params["max_tokens"] = int(max_tokens)
         except (TypeError, ValueError):
             pass
-    effort = payload.get("reasoning_effort")
-    if not effort and isinstance(payload.get("reasoning"), dict):
-        effort = (payload.get("reasoning") or {}).get("effort")
-    if not effort and isinstance(payload.get("thinking"), dict):
-        # 兼容 thinking.effort / thinking_level 风格客户端
-        effort = (payload.get("thinking") or {}).get("effort") \
-            or (payload.get("thinking") or {}).get("level")
-    if effort:
-        norm, note = normalize_reasoning_effort(effort, catalog_meta)
-        if note:
-            log("reasoning_effort %s on '%s' (supported=%s)"
-                % (note, model_key or model, supported_efforts(catalog_meta)), tag="chat")
-        if norm:
-            params["reasoning_effort"] = norm
+    if effort_norm:
+        params["reasoning_effort"] = effort_norm
+        # 与官方 SDK 一致：同步下发开关（none = 关思考，其余 = 开思考）；
+        # 客户端给了思考预算时原样透传 reasoning_budget_tokens。
+        if effort_norm == "none":
+            params["enable_thinking"] = False
+        else:
+            params["enable_thinking"] = True
+            if think_budget and think_budget > 0:
+                params["reasoning_budget_tokens"] = int(think_budget)
+    if ctx_len:
+        params["context_length"] = ctx_len
     body["parameters"] = params
 
     # tools：客户端给了就用客户端的（custom freeform 已降级），否则置空，
@@ -4191,8 +4440,26 @@ class Handler(BaseHTTPRequestHandler):
         served = "国内版" if owner == "cn" else "国际版"
         used = "国内版" if realm == "cn" else "国际版"
         return ("模型 %s 只在%s提供，但「%s」绑定的是%s出口。"
-                "请改用对应出口的 Key，或把该 Key 的出口改为「跟随面板切换」。"
+                "请改用对应出口的 Key，或把该 Key 的出口改为"
+                "「跟随网关出口（自动）」。"
                 % (model, served, name, used))
+
+    def _no_account_message(self, message):
+        """「没有可用账号」时，结合 Key 的出口绑定给出具体原因与出路。"""
+        bound = self._key_realm()
+        if not bound or not POOL:
+            return message + " - add or enable one at the dashboard (/)"
+        name = (self.key_entry or {}).get("name") or "当前 Key"
+        bound_name = "国内版" if bound == "cn" else "国际版"
+        other = "cn" if bound == "intl" else "intl"
+        other_name = "国内版" if other == "cn" else "国际版"
+        if POOL.count_ready(other) > 0:
+            return ("%s - 「%s」固定走%s出口，该出口当前没有可用账号；"
+                    "%s出口仍有可用账号，把该 Key 的出口改为"
+                    "「跟随网关出口（自动）」即可失效自动切换"
+                    % (message, name, bound_name, other_name))
+        return ("%s - 「%s」固定走%s出口，请在看板 (/) 启用或导入该区域的账号"
+                % (message, name, bound_name))
 
     def _request_realm(self, explicit=None):
         """Pick the upstream exit for this request.
@@ -4323,14 +4590,19 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/v1/models", "/models"):
             if not self._authorized():
                 return
-            req_realm = self._request_realm() or CURRENT_REALM
+            # Key 绑定的出口优先；未绑定（或显式值非法）时按网关出口模式：
+            # 双区 = 两区模型并集（每条标注 realm/realms，还能发现另一区模型），
+            # 单区 = 该区清单。看板始终显式带 ?realm=，展示不受影响。
+            req_realm = self._request_realm()
+            if req_realm not in ("intl", "cn"):
+                req_realm = "both" if REALM_MODE == "both" else REALM_MODE
             try:
                 entries = fetch_models(realm=req_realm)
             except Exception as exc:
                 return self._error(502, str(exc))
             data = [model_entry(mid, meta) for mid, meta in entries]
             return self._json(200, {"object": "list", "data": data,
-                                    "realm": req_realm or CURRENT_REALM})
+                                    "realm": req_realm})
         if path in ("/usage", "/v1/usage"):
             if not self._authorized():
                 return
@@ -4590,6 +4862,34 @@ class Handler(BaseHTTPRequestHandler):
             qoder_settings.set_auth_disabled(ACCOUNTS_DIR,
                                              payload.get("auth_disabled"))
             reply["auth_disabled"] = bool(payload.get("auth_disabled"))
+        if "model_overrides" in payload:
+            # 看板模型库改默认值：{key: {context_window, effort}}，
+            # 空字符串/0 表示删除该项（恢复跟随官方默认）。
+            patch = payload.get("model_overrides")
+            if not isinstance(patch, dict):
+                return self._error(400, "model_overrides must be an object",
+                                   "invalid_request_error")
+            saved = {}
+            for key, value in patch.items():
+                if not isinstance(value, dict):
+                    return self._error(400,
+                                       "each model override must be an object",
+                                       "invalid_request_error")
+                try:
+                    item = qoder_settings.set_model_override(
+                        ACCOUNTS_DIR, key,
+                        context_window=value.get("context_window"),
+                        effort=value.get("effort"))
+                except (TypeError, ValueError) as exc:
+                    return self._error(400, "bad model override '%s': %s"
+                                       % (key, exc), "invalid_request_error")
+                saved[key] = item
+            reply["model_overrides_saved"] = saved
+            reply["model_overrides"] = qoder_settings.model_overrides(
+                ACCOUNTS_DIR)
+            log("model override updated: %s"
+                % (", ".join("%s -> %s" % (k, v) for k, v in saved.items())
+                   or "(nothing to change)"))
         new_key = payload.get("api_key")
         if new_key is not None:
             new_key = str(new_key).strip()
@@ -5058,8 +5358,7 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, 502, message,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             if message.startswith("no usable account"):
-                return self._error(503, message
-                                   + " - add or enable one at the dashboard (/)")
+                return self._error(503, self._no_account_message(message))
             return self._error(502, "upstream unreachable: %s" % exc)
         with upstream:
             if want_stream:
@@ -5260,8 +5559,7 @@ class Handler(BaseHTTPRequestHandler):
             record_error(model, 502, message,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             if message.startswith("no usable account"):
-                return self._error(503, message
-                                   + " - add or enable one at the dashboard (/)")
+                return self._error(503, self._no_account_message(message))
             return self._error(502, "upstream unreachable: %s" % exc)
 
         with upstream:

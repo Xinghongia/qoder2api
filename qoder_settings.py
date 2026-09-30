@@ -194,7 +194,7 @@ def api_keys(accounts_dir):
         if legacy:
             return [{
                 "id": "legacy",
-                "name": "默认（跟随面板切换）",
+                "name": "默认（跟随网关出口）",
                 "key": legacy,
                 "realm": "",
                 "enabled": True,
@@ -260,6 +260,72 @@ def set_auth_disabled(accounts_dir, disabled):
         data = load(accounts_dir)
         data["auth_disabled"] = bool(disabled)
         save(accounts_dir, data)
+
+
+# ------------------------------------------------- per-model defaults
+# 官方桌面端为每个模型单独存「上下文窗口 + 思考档位」偏好（本地 model
+# preferences 表），网关这边用同样的思路存一份：**客户端请求里带了什么就
+# 用什么，没带才落到这里的默认值**。键为 "<realm>:<上游 key>"（同一个 key
+# 在两区的窗口/档位可能不同）。
+
+def model_overrides(accounts_dir):
+    """所有模型的默认上下文窗口 / 思考档位，{realm:key: {...}}。"""
+    data = load(accounts_dir)
+    raw = data.get("model_overrides")
+    out = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            name = str(key or "").strip()
+            if not name or not isinstance(value, dict):
+                continue
+            item = {}
+            try:
+                window = int(value.get("context_window"))
+                if window > 0:
+                    item["context_window"] = window
+            except (TypeError, ValueError):
+                pass
+            effort = str(value.get("effort") or "").strip().lower()
+            if effort:
+                item["effort"] = effort
+            if item:
+                out[name] = item
+    return out
+
+
+def set_model_override(accounts_dir, key, context_window=None, effort=None):
+    """写入/更新/删除单个模型的默认值。
+
+    传 None 表示「不动这一项」；传空字符串或 0 表示「删除这一项」。
+    返回该模型剩余的默认值。
+    """
+    with _lock:
+        data = load(accounts_dir)
+        raw = data.get("model_overrides")
+        raw = dict(raw) if isinstance(raw, dict) else {}
+        name = str(key or "").strip()
+        if not name:
+            raise ValueError("model key is required")
+        item = dict(raw.get(name) or {})
+        if context_window is not None:
+            text = str(context_window).strip()
+            if not text or text == "0":
+                item.pop("context_window", None)
+            else:
+                item["context_window"] = int(text)
+        if effort is not None:
+            text = str(effort).strip().lower()
+            if not text:
+                item.pop("effort", None)
+            else:
+                item["effort"] = text
+        if item:
+            raw[name] = item
+        else:
+            raw.pop(name, None)
+        data["model_overrides"] = raw
+        save(accounts_dir, data)
+        return item
 
 
 # ----------------------------------------------------------- outbound proxy
