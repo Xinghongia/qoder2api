@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.1.8-2496ED?style=flat-square" alt="Version 1.1.8">
+  <img src="https://img.shields.io/badge/Release-v1.2.0-2496ED?style=flat-square" alt="Version 1.2.0">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -222,13 +222,27 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 
 - **列表**：`GET /sash/api/v1/me/campaigns`（双区域通用）——**必须同时满足两层**，缺一层都会静默少活动：
   1. **桌面端请求头**（`Cosy-ClientType: 10` + `Cosy-Version` + 机器头 + `UA: Qoder`）；缺了 → 服务端不报错、直接返回**空列表**；
-  2. **真实机器身份**（`Cosy-MachineToken/Type/Code`）——官方桌面端在拉活动前会 spawn 自带的风控桥 `resources/umid/runtime-info.exe prod --account-stdin`（stdin `{"account": <uid>}`）取真值；用派生假值时列表会**静默少掉设备定向活动**（「每日领取 100 Credits」即其中之一）。网关现在调用同一个官方二进制取真值（结果缓存 6h，`QD_NATIVE_IDENTITY=0` 可关闭），失败才回退派生值并在活动状态里标注 `identity=derived`；
+  2. **真实机器身份**（`Cosy-MachineToken/Type/Code`）——官方桌面端在拉活动前会 spawn 自带的风控桥 `resources/umid/runtime-info.exe prod --account-stdin`（stdin `{"account": <uid>}`）取真值；用派生假值时列表会**静默少掉设备定向活动**（「每日领取 100 Credits」即其中之一）。网关现在调用同一个官方二进制取真值（结果按区域缓存 **30 分钟**、领取前强制刷新、列表被判为未认可时自动换新身份重试，`QD_NATIVE_IDENTITY=0` 可关闭），失败才回退派生值并在活动状态里标注 `identity=derived`；
+     - **跨区借用**：机器身份是**机器级、与区域无关**的（实测同一机器上国内/国际账号取到的 token/type/code 完全一致，桥的输出里也没有区域字段）。因此**只装了单区客户端时，另一区借用同一个桥**（本区域客户端 > 本区域 CLI 缓存 `~/.qoder-cn(.qoder)/.bin/umid-*` > 另一区，`QD_RUNTIME_INFO=<路径>` 可显式指定）——以前"只装国内版 → 国际账号一直是派生假身份"的短板已修复；
 - **领取**：对 `claimStatus=CLAIMABLE` 且 `actionType=CLAIM_BENEFIT` 的活动 `POST /sash/api/v1/me/campaigns/{campaignId}/claim`（逆向自官方 `growth-page/activity-iframe` 页面 JS）。**官方幂等**：已领取返回 `{"status":"CLAIMED","replayed":true}`，不会重复发放；`GET …/{id}/reward` 可查发放状态；
 - **任务中心**：`daily_checkin` 行直接反映真实活动状态——可领取显示「可领取 100 Credits（act-…）—— 点『一键签到』自动领取」，已领取显示「今日已领取 +100 Credits，明日再来」；
 - **旧 sash 接口**（`/sash/api/v1/me/daily-check-in/*`）仅在仍开放时作为兜底并附一行历史状态；能力运行时探测（404/405/410 记「本区域无此接口」，6 小时后自动重探）。实测国内版 `status=DISABLED`、国际版全 404；
 - **额度体系**：`/api/v2/quota/usage` 聚合基础额度 + 赠送/签到额度；`/api/v2/user/plan` 套餐名（Pro Trial 等）；
 - **Pro 福利包**：一次性 +1800 积分，`eligibility → claim` 两步走（端点 404 时视为活动未开放）；
-- **看板「签到与福利中心」**：连续签到天数、积分余额、福利包状态卡片 + 任务行表格，支持单账号/批量；国内版与国际版账号都会列出。
+- **看板「签到与福利中心」**：连续签到天数、积分余额、福利包状态卡片 + 任务行表格，支持单账号/批量；国内版与国际版账号都会列出；另含「本机虚拟化检测」卡片（见下）。
+
+**官方活动与新人权益规则**（官方文档原文 + 实测，解释"为什么有的号有、有的没有"）：
+
+| 项目 | 国际版 | 国内版 |
+|---|---|---|
+| 每日 100 Credits | 每账号每轮限领一次（**实际执行按"人"去重，见下**）；每日 10:00（UTC+8）刷新，错过不补；奖励 30 天有效；仅桌面端可领；新老个人用户均可（团队/企业不适用） | 规则同款（北京时间 10:00 刷新；体验版/专业版/高级版/旗舰版/会员卡均可） |
+| 新人权益 | **14 天 Pro 试用 + 300 Credits**：首次登录桌面客户端时发放（要求最新版）；**虚拟机不参与**；**每个用户限一次，额外注册的试用账号会被冻结** | 新注册用户活动（如「奶茶免单卡」）：桌面端完成指定成就（如 `sites_first_use`）后领取，任务中心会显示所需成就 |
+| 月度基础额度 | Free 档 **0 Credits**（超额后自动切基础模型） | 体验版/试用按套餐发放（实测 Pro Trial 300/月） |
+| 风控 | 客户端原生桥（`runtime-info.exe`）回传机器身份 + **VM 检测**；活动列表按真实机器身份定向下发，伪造/缺失会被静默过滤 | 同款原生桥与 VM 检测 |
+
+- **按"人"去重（实测）**：官方文档写"每账号每轮限领一次"，但**服务端实际按"人"执行**——同一台机器（相同 machineToken/Type/Code，与 account 参数无关）上的所有账号被合并为一人；任何一个号领了本轮，其他号领取返回 `status=BLOCKED + failureCode=SAME_PERSON_ALREADY_CLAIMED`，且列表里连活动都不显示。网关如实识别这种状态（不计为成功、不虚报积分，日志给出"同人已领取"说明）；
+- > 因此「注册了几个号都没有新人 300 / 没有签到活动」的常见原因：① 跑在**虚拟机/云桌面**里（新人 300 明确不参与，活动也可能被风控过滤）；② **同用户批量注册**——第一个号拿走试用后，其余号会被冻结；③ 只注册了网页账号、**没登录过最新版桌面客户端**（300 在首次登录客户端时发）；④ 同一台机器上**别的账号本轮已经领过**（按人去重）；⑤ 活动是**成就门控**（需在官方桌面端完成对应任务）；
+- **本机虚拟化检测**：看板「签到与福利中心 · 本机虚拟化检测」卡片与 `GET /diag/vm` 展示官方风控桥 `vmInfo` 判定（是否虚拟机/平台/风险评分）+ 本机交叉校验证据（CPU 型号、系统制造商、虚拟化驱动、VBS/HVCI）。注意：开了 VBS/内核隔离的**实体机** isVm 可能误报；`python _diag_campaign.py` 一次性输出上述全部体检信息（只读不领取）。
 
 ### 4. 后台常驻定时调度器 (Scheduler)
 
@@ -314,21 +328,28 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | POST | /accounts/login/start | 发起 OAuth 设备授权 |
 | POST | /accounts/import/pat | 导入 PAT 令牌 |
 | POST | /accounts/checkin | 手动签到（单个/全部） |
+| GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
+| GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
 
 ---
 
 ## 六、开发与测试
 
 ```bash
-# 离线确定性测试（294 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
+# 离线确定性测试（430 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
 # 自定义 B64、COSY 签名、双区官方目录全字段（峰谷价/多窗口/思考档位/展示 id/解析）、
-# 独占路由、签到能力运行时探测与 DISABLED 归一化、活动平台归一化、DeepSeek
-# reasoning_content 回填与 flatten 保留、请求体、信封解包、custom 工具转译、
+# 独占路由、签到能力运行时探测与 DISABLED 归一化、活动平台归一化（含同人去重
+# BLOCKED）、成就门控任务行、虚拟化状态映射、版本检测三态、面板短缓存命中/失效、
+# DeepSeek reasoning_content 回填与 flatten 保留、请求体、信封解包、custom 工具转译、
 # 本机凭证扫描）
 python _test_qoder.py
 
 # 直接启动
 python qoder_proxy.py --port 8790
+
+# 活动资格与新人权益自检（为什么某个账号没有签到/没有新人 300；只读不领取）
+python _diag_campaign.py            # 体检全部账号
+python _diag_campaign.py --uid XX   # 只看某个账号（uid 前缀）
 
 # 客户端更新后刷新官方模型快照（解密本机客户端目录缓存 → 双区 JSON 快照，
 # 并打印价格/上下文/思考档位的变化摘要；--dry-run 只看差异不写文件）
@@ -362,6 +383,26 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.0
+
+**合并上游当日成果（原作者 2026-10-01 的 7 个提交，按我们的结构逐项移植，未改动既有功能）**
+
+- **同人去重修正（上游 cfe7044）**：领取接口识别 `status=BLOCKED + failureCode=SAME_PERSON_ALREADY_CLAIMED`（同一机器下多账号被服务端合并为"一人"，先领者独占本轮额度）——此前会被当成成功**虚报积分**；现在如实归类、日志给出"同人已领取"说明、看板不被误报；
+- **活动资格诊断 + 成就门控（b8a75c6 / 8c48112 / ef2e34d）**：新增 `_diag_campaign.py`（机器身份/VM/套餐/活动逐条/成就/结论一键体检，只读）；任务中心对 `ACHIEVEMENT_NOT_COMPLETED` 类活动显示所需成就而不是静默跳过；"暂无活动"行给出常见原因提示；
+- **本机虚拟化检测（f359c31）**：新增 `GET /diag/vm`（面板鉴权）+ 看板「本机虚拟化检测」卡片——官方风控桥 vmInfo（是否虚拟机/平台/评分）+ 本机交叉校验（CPU/制造商/虚拟化驱动/VBS/HVCI 误报提示）；`/diag` 路由纳入面板鉴权；
+- **性能（25af8e3 的兼容部分）**：`/tasks` 的 5 路上游查询**并行化** + 20 秒面板短缓存（签到/领取/刷新额度后立即失效）；活动列表 20 秒短缓存（领取路径强制绕过）；原生身份缓存 120s → **30 分钟**（上游实测旧身份仍被接受，强制刷新一次约 3.7s 是首屏卡顿主因；领取前仍强制刷新 + 列表自愈重试兜底）；账号文件写入加锁（并行刷新不再有坏 JSON 风险）；看板切视图改并行请求；
+- **新版本检测（25af8e3 + eca5c42）**：设置页「运行信息 · 新版本检测」+ 标题旁升级徽标；`GET /update/check`（面板鉴权、6h 缓存、`force=1` 强刷；网络失败不误报"有更新"，仓库暂无 release 时优雅降级）。更新源默认本仓库，`QD_UPDATE_REPO=owner/repo` 可覆盖；
+- **跨区风控桥借用**：官方桥的机器身份与区域无关（实测同一机器上国内/国际账号取到的 token/type/code 完全一致）。本区域没装客户端/CLI 时自动借用另一区域的桥——修复"只装国内版客户端 → 国际账号一直用派生假身份、设备定向活动可能被静默过滤"的短板；`_diag_campaign.py` 的身份行会标注"借用X版风控桥"；
+- **未移植**（与我们的多区模式/看板定制冲突）：按视图区域过滤 `/tasks` 账号池、`initRealm` 视图保持（我们已有等效实现）。
+
+### v1.1.9
+
+**修复：看板「刷新积分」点了没用/不报错的三种情况**
+- 手动刷新改为**全部账号**：此前只刷新"当前页签区域"的账号（停在「国际版」页签时，国内账号不会刷新，看起来就是"点了没用"）；
+- 单个账号拉取失败时**如实报错**（哪个账号、什么原因，如网络不通/代理不可用/凭证失效），不再一律弹"已成功刷新 N 个账号"——服务器出网受限或代理配置错误时会被静默吞掉，表现为刷新无反应；
+- 刷新后**同步更新「签到与福利中心」的积分额度余额卡片**（此前该卡片不跟随刷新按钮，且后端有旧快照时不再重新拉取）；
+- 账号积分数值悬停显示快照时间（更新于 …），数据新旧一眼可辨。
 
 ### v1.1.8
 

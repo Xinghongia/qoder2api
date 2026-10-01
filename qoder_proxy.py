@@ -49,10 +49,11 @@ import qoder_net
 import qoder_settings
 import qoder_sign
 from qoder_sign import qoder_encode, SESSIONS
-from qoder_accounts import get_realm_config, gateway_candidates, CLIENT_UA
+from qoder_accounts import (get_realm_config, gateway_candidates, CLIENT_UA,
+                            local_vm_status)
 from pathlib import Path
 
-VERSION = "1.1.8"
+VERSION = "1.2.0"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 if CURRENT_REALM not in ("intl", "cn"):
@@ -2253,6 +2254,77 @@ def client_thinking(payload):
             or reasoning.get("enabled") is False:
         out["disable"] = True
     return out
+
+
+# ---------------------------------------------------------------------------
+# 项目新版本检测（对比 GitHub 最新 release；结果缓存 6 小时）
+# ---------------------------------------------------------------------------
+# 默认跟随「本仓库」的 release；QD_UPDATE_REPO=owner/repo 可覆盖。
+UPDATE_CHECK_REPO = (os.environ.get("QD_UPDATE_REPO")
+                     or "Xinghongia/qoder2api-hub")
+UPDATE_CHECK_TTL = 6 * 3600
+_update_cache = {"at": 0.0, "data": None}
+
+
+def version_tuple(value):
+    """'v1.2.3' -> (1, 2, 3)；容忍前缀与不足位数。"""
+    out = []
+    for chunk in str(value or "").lstrip("vV").split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        out.append(int(digits or 0))
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out[:3])
+
+
+def check_for_update(force=False):
+    """检查项目是否有新版本（对比当前 VERSION 与 GitHub 最新 release）。
+
+    返回 {ok, current, latest, has_update, url, published_at, name, checked_at,
+          error, no_releases}。网络不可用/被墙时 ok=False + error，看板据此
+    显示"检查失败"而不是误报；仓库还没有任何 release 时按"暂无发布记录"
+    优雅处理（不当作错误）。
+    """
+    now = time.time()
+    cached = _update_cache.get("data")
+    if cached and not force and now - _update_cache.get("at", 0) < UPDATE_CHECK_TTL:
+        return cached
+    info = {"ok": False, "current": VERSION, "latest": "", "has_update": False,
+            "url": "", "published_at": "", "name": "", "checked_at": int(now),
+            "error": "", "no_releases": False}
+    try:
+        url = validate_public_http_url(
+            "https://api.github.com/repos/%s/releases/latest" % UPDATE_CHECK_REPO)
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "qoder-proxy-update-check",
+        })
+        with qoder_net.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        tag = str(data.get("tag_name") or "").strip()
+        info.update({
+            "ok": True,
+            "latest": tag,
+            "url": str(data.get("html_url") or ""),
+            "published_at": str(data.get("published_at") or ""),
+            "name": str(data.get("name") or ""),
+            "has_update": bool(tag) and version_tuple(tag) > version_tuple(VERSION),
+        })
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            # 仓库还没有发布过 release：不是错误，只是暂无更新源
+            info.update({"ok": True, "no_releases": True})
+        else:
+            info["error"] = "HTTP %d" % exc.code
+    except Exception as exc:
+        info["error"] = str(exc)[:160]
+    _update_cache.update({"at": now, "data": info})
+    return info
 
 
 def is_deepseek_model(model="", model_key=""):
@@ -4517,6 +4589,10 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/logs"):
             return True
+        if path.startswith("/diag"):
+            return True
+        if path.startswith("/update"):
+            return True
         return False
 
     def do_OPTIONS(self):
@@ -4587,6 +4663,24 @@ class Handler(BaseHTTPRequestHandler):
                                     "mode": REALM_MODE,
                                     "preferred": REALM_PREFERRED,
                                     "options": ["intl", "cn"]})
+        if path == "/diag/vm":
+            # 本机虚拟化检测（看板「签到与福利中心」展示；中文输出）。
+            # 以官方风控桥 runtime-info.exe 的 vmInfo 为准，桥不可用时本机交叉校验。
+            _q = parse_qs(urlparse(self.path).query)
+            try:
+                return self._json(200, local_vm_status(
+                    _q.get("realm", [None])[0] or CURRENT_REALM,
+                    force=bool(_q.get("force", [None])[0])))
+            except Exception as exc:
+                return self._error(500, "vm status failed: %s" % exc)
+        if path == "/update/check":
+            # 项目新版本检测（看板「运行信息 · 新版本检测」；缓存 6h，force=1 强刷）
+            _q = parse_qs(urlparse(self.path).query)
+            try:
+                return self._json(200, check_for_update(
+                    force=bool(_q.get("force", [None])[0])))
+            except Exception as exc:
+                return self._error(500, "update check failed: %s" % exc)
         if path in ("/v1/models", "/models"):
             if not self._authorized():
                 return
@@ -5012,6 +5106,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "credits": account.credits,
                                 "plan": account.plan,
                                 "error": res.get("error", "")})
+            # 手动刷新额度后，看板 /tasks 也看到新快照（不吃 20s 面板缓存）
+            import qoder_tasks
+            qoder_tasks.invalidate_panel_cache()
             return self._json(200, {"results": results,
                                     "accounts": account_views()})
         if path == "/tasks/run":
@@ -5033,6 +5130,7 @@ class Handler(BaseHTTPRequestHandler):
             if not targets:
                 return self._json(200, {"ok": False, "msg": "未找到可用账号（账号已禁用或缺少凭证）"})
             res = qoder_tasks.run_batch_checkin(targets, gap=1.0)
+            qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
             return self._json(200, {
                 "ok": res["ok"],
                 "credit_added": res["credit_added"],
@@ -5057,6 +5155,7 @@ class Handler(BaseHTTPRequestHandler):
             if not targets:
                 return self._json(200, {"ok": False, "msg": "未找到可用账号（账号已禁用或缺少凭证）"})
             res = qoder_tasks.run_batch_pro_claim(targets)
+            qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
             return self._json(200, {
                 "ok": True,
                 "results": res["results"],
@@ -5093,6 +5192,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "preferred": REALM_PREFERRED,
                                     "persisted": True})
         if path == "/accounts/checkin":
+            import qoder_tasks
             uid = payload.get("uid")
             targets = [POOL.get(uid)] if uid else list(POOL.accounts)
             results = []
@@ -5105,6 +5205,7 @@ class Handler(BaseHTTPRequestHandler):
                 res = account.checkin()
                 results.append({"uid": account.uid,
                                 "nickname": account.nickname, **res})
+            qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
             return self._json(200, {"results": results,
                                     "accounts": account_views()})
         if path == "/accounts/login/start":

@@ -10,12 +10,36 @@
    让签到中心复用与成长任务一致的表格渲染。
 5. 严格遵守 >= 1.0s 防风控间隔，并使用 qoder_fingerprint 的稳定设备指纹。
 """
+import sys
+import threading
 import time
 
 import qoder_accounts
 from qoder_accounts import get_realm_config
 
 _log = lambda msg: None
+
+# ---------------------------------------------------------------------------
+# 面板读路径短缓存
+# ---------------------------------------------------------------------------
+# 看板每次切视图/切账号都会重建任务视图，而各上游小查询（签到状态 / Pro 资格 /
+# 额度 / 套餐）每个约 1–4 秒（TLS/风控身份），即使并行也会拖时间。这些字段变化
+# 极慢（额度/套餐按天，活动按天），因此面板路径做 20 秒短缓存；**签到/领取等
+# 写操作后由调用方 invalidate_panel_cache() 立即失效**，所以用户点完签到看到的
+# 一定是新数据。
+PANEL_CACHE_TTL = 20
+_panel_cache = {}
+_panel_lock = threading.Lock()
+
+
+def invalidate_panel_cache(uid=None):
+    """清除面板短缓存；uid 为空时全部清除（写操作后调用）。"""
+    with _panel_lock:
+        if uid:
+            for k in [k for k in _panel_cache if k[0] == uid]:
+                _panel_cache.pop(k, None)
+        else:
+            _panel_cache.clear()
 
 
 def set_logger(fn):
@@ -50,9 +74,14 @@ def fetch_task_view(account):
     }
 
     # --- 每日签到：以官方活动平台为准（旧 sash 接口仅在仍然开放时附一行） ---
-    camp = account.campaigns()
+    # 这几个上游调用彼此独立，**并行**发出（原先串行可达 3–9 秒，是看板切换
+    # 视图/账号卡顿的主因）；账号文件写入由 Account._SAVE_LOCK 串行化，并行安全。
+    camp, status_pair, pro_pair, credits_res, plan_name = \
+        _fetch_upstream_parallel(account)
+    if plan_name:
+        account.plan = plan_name
     tasks.append(_campaign_task_row(account, camp, summary))
-    ok, st = account.checkin_status()
+    ok, st = status_pair
     if ok:
         summary["streak_days"] = st["streak_days"]
     if ok and st.get("active"):
@@ -77,7 +106,7 @@ def fetch_task_view(account):
         })
 
     # --- Pro 升级包（一次性福利） ---
-    ok2, elig = account.pro_eligibility()
+    ok2, elig = pro_pair
     if ok2:
         if elig:
             p_status, p_cur = "completed", 1     # 待领取
@@ -110,17 +139,87 @@ def fetch_task_view(account):
     # --- 额度卡片（energy -> 积分余额；travel -> 福利包状态） ---
     if account.credits:
         summary["energy"] = account.credits.get("remain", 0)
-    else:
-        account.fetch_credits()
+    elif credits_res.get("ok"):
         summary["energy"] = (account.credits or {}).get("remain", 0)
     if ok2 and elig:
         summary["travel"] = {"state": "arrived", "reward_credit": 1800}
     else:
         summary["travel"] = {"state": "idle", "daily_limit_reached": True}
 
-    account.fetch_plan()
     summary["plan"] = account.plan or summary["plan"]
     return tasks, summary
+
+
+def _fetch_upstream_parallel(account, force=False):
+    """并行取回任务视图所需的 5 组上游数据（互不依赖）。
+
+    返回 (campaigns, (ok, status), (ok, elig), credits_res, plan_name)。
+    单个调用失败不影响其余（各自在内部吞错并返回错误结构），因此并行是安全的；
+    账号文件保存已由 Account._SAVE_LOCK 串行化。
+
+    QD_TASKS_DEBUG=1 时把每个子调用的耗时打到 stderr（排查看板卡顿用）。
+    """
+    import os
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+
+    def timed(name, fn):
+        key = (account.uid, name)
+        now = _t.time()
+        if not force:
+            with _panel_lock:
+                hit = _panel_cache.get(key)
+            if hit and now - hit[0] < PANEL_CACHE_TTL:
+                if os.environ.get("QD_TASKS_DEBUG"):
+                    try:
+                        sys.stderr.write("[tasks-debug] %-18s cached\n" % name)
+                        sys.stderr.flush()
+                    except Exception:
+                        pass
+                return hit[1]
+        t0 = now
+        try:
+            out = fn()
+        except Exception:
+            raise
+        else:
+            with _panel_lock:
+                now_i = _t.time()
+                # 顺手清理过期条目，避免长时间运行后字典无界增长
+                for k in [k for k, v in _panel_cache.items()
+                          if now_i - v[0] > 300]:
+                    _panel_cache.pop(k, None)
+                _panel_cache[key] = (now_i, out)
+            return out
+        finally:
+            if os.environ.get("QD_TASKS_DEBUG"):
+                try:
+                    sys.stderr.write("[tasks-debug] %-18s %.2fs\n"
+                                     % (name, _t.time() - t0))
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_camp = ex.submit(timed, "campaigns", account.campaigns)
+        f_status = ex.submit(timed, "checkin_status", account.checkin_status)
+        f_pro = ex.submit(timed, "pro_eligibility", account.pro_eligibility)
+        f_credits = ex.submit(timed, "fetch_credits", account.fetch_credits)
+        f_plan = ex.submit(timed, "fetch_plan", account.fetch_plan)
+
+        def _safe(fut, fallback):
+            try:
+                return fut.result()
+            except Exception:
+                return fallback
+
+        camp = _safe(f_camp, {"ok": False, "available": True,
+                              "error": "parallel fetch failed", "campaigns": []})
+        status_pair = _safe(f_status, (False, {"error": "parallel fetch failed"}))
+        pro_pair = _safe(f_pro, (False, "parallel fetch failed"))
+        credits_res = _safe(f_credits, {"ok": False})
+        plan_name = _safe(f_plan, "")
+    return camp, status_pair, pro_pair, credits_res, plan_name
 
 
 def _campaign_task_row(account, camp, summary):
@@ -139,6 +238,7 @@ def _campaign_task_row(account, camp, summary):
               "action_type": c.get("action_type", ""),
               "claim_status": c.get("claim_status", ""),
               "benefit_amount": (c.get("benefit") or {}).get("amount", 0),
+              "required_achievement_key": c.get("required_achievement_key", ""),
               "start_at": c["start_at"],
               "end_at": c["end_at"]} for c in camp.get("campaigns") or []]
     summary["campaigns"] = {
@@ -164,6 +264,9 @@ def _campaign_task_row(account, camp, summary):
                  if c["claim_status"] == "CLAIMABLE"
                  and c["action_type"] in ("", "CLAIM_BENEFIT")]
     claimed = [c for c in items if c["claim_status"] == "CLAIMED"]
+    # 成就门控活动（如 CN 新人「奶茶免单卡」需先完成 sites_first_use）：
+    # 服务端状态 ACHIEVEMENT_NOT_COMPLETED —— 显示成就要求，不能直接领取
+    gated = [c for c in items if c["claim_status"] == "ACHIEVEMENT_NOT_COMPLETED"]
     if claimable:
         amount = sum(c["benefit_amount"] or 0 for c in claimable)
         keys = ", ".join(c["key"] for c in claimable)
@@ -194,7 +297,24 @@ def _campaign_task_row(account, camp, summary):
             "reward_credit": amount,
             "reward_energy": 0,
         }
-    desc = "当前账号暂无可参与的官方活动"
+    if gated:
+        keys = ", ".join(c["key"] for c in gated)
+        reqs = ", ".join(c.get("required_achievement_key") or "?"
+                         for c in gated)
+        return {
+            "task_code": "daily_checkin",
+            "name": "每日签到（每日领取 Credits）",
+            "description": "有活动但需先完成成就：%s（活动 %s）——在官方桌面端"
+                           "完成对应任务后可领" % (reqs, keys),
+            "jump_url": jump,
+            "status": "not_accepted",
+            "current": 0,
+            "target": 1,
+            "reward_credit": sum(c["benefit_amount"] or 0 for c in gated),
+            "reward_energy": 0,
+        }
+    desc = ("当前账号暂无可参与的官方活动（每日 100 为定向下发：常见原因——账号未在"
+            "活动定向内、虚拟机环境、试用资格已用尽/冻结；详见 README「活动与新人权益规则」）")
     if camp.get("show_campaign"):
         desc = "活动进行中，当前账号暂无可领取项"
     return {
@@ -282,6 +402,10 @@ def run_checkin(account, gap=1.0):
                          for c in camp["claimed"])
         earned = int(camp.get("earned") or 0)
         logs.append(f"✓ [{name}] 活动领取成功 +{earned} Credits（{keys}）")
+    elif camp.get("blocked"):
+        codes = ", ".join(b.get("failure_code") or "?" for b in camp["blocked"])
+        logs.append(f"⚠ [{name}] 同人已领取：同一设备/身份下其他账号本轮已领"
+                    f"（服务端按人去重，{codes}），本号本轮不再发放")
     elif camp.get("already"):
         keys = ", ".join(c.get("campaign_key") or c.get("campaign_id")
                          for c in camp["already"])

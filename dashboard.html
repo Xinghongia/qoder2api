@@ -217,7 +217,11 @@ a:hover{text-decoration:underline}
 <body>
 <header>
   <div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap">
-    <h1><span class="dot" id="statusDot"></span>Qoder 网关看板</h1>
+    <h1><span class="dot" id="statusDot"></span>Qoder 网关看板<a id="updateBadge" href="#" target="_blank" rel="noopener"
+         style="display:none;margin-left:10px;font-size:12px;font-weight:600;vertical-align:middle;
+                background:rgba(56,189,248,.14);color:var(--accent);border:1px solid rgba(56,189,248,.4);
+                border-radius:999px;padding:2px 10px;text-decoration:none"
+         title="发现新版本，点击前往 Releases 升级"></a></h1>
     <nav class="main-nav">
       <button class="main-nav-btn active" id="btnNavGateway" onclick="switchMainTab('gateway')">
         网关与运维
@@ -417,6 +421,12 @@ a:hover{text-decoration:underline}
       <div class="card"><div class="val" id="stkDays">-</div><div class="lbl">连续签到天数</div></div>
       <div class="card accent"><div class="val" id="nrgBalance">-</div><div class="lbl">积分额度余额</div></div>
       <div class="card accent2"><div class="val" id="catState">-</div><div class="lbl" id="catDesc">Pro 福利包状态</div></div>
+      <div class="card" id="cardVmState" title="官方客户端按设备风控身份下发活动；本机虚拟化环境会被计入风险画像">
+        <div class="val" id="vmState" style="font-size:16px">-</div>
+        <div class="lbl" id="vmDesc">本机虚拟化检测</div>
+        <div style="font-size:11px;color:var(--dim);margin-top:6px;line-height:1.5" id="vmEvidence"></div>
+        <div style="margin-top:8px"><button onclick="refreshVmState(this)" style="font-size:11px;padding:3px 8px">重新检测</button></div>
+      </div>
     </div>
 
     <div style="overflow-x:auto">
@@ -566,6 +576,10 @@ a:hover{text-decoration:underline}
       <table>
         <tbody>
           <tr><td>当前版本</td><td class="mono" id="setVersion">-</td></tr>
+          <tr><td>新版本检测</td>
+              <td><span id="updateState" style="color:var(--dim)">尚未检查</span>
+                  <span id="updateActions" style="margin-left:8px"></span>
+              </td></tr>
           <tr><td>账号存储目录</td><td class="mono" id="setAccountsDir">-</td></tr>
           <tr><td>用量日志目录</td><td class="mono" id="setUsageDir">-</td></tr>
           <tr><td>设置文件</td><td class="mono" id="setFile">-</td></tr>
@@ -949,17 +963,80 @@ async function switchViewRealm(r){
   window.VIEW_REALM = r;
   RECENT_PAGE = 1;
   window.updateUI();
-  await loadAccounts();
-  await loadModels();
-  await loadGrowthTasks();
-  await loadSchedulerStatus();
-  await loadAnalytics();
-  await refresh();
+  // 并行刷新：此前是 6 个请求串行 await（每个都要打上游），切一次视图要等
+  // 好几秒。后端 /tasks、/v1/models 均带短缓存，并行后基本即点即出。
+  await Promise.all([
+    loadAccounts(),
+    loadModels(),
+    loadGrowthTasks(),
+    loadSchedulerStatus(),
+    loadAnalytics(),
+    refresh(),
+  ]);
 };
 
 function realmModeText(mode, pref){
   if(mode === "both") return "双区（优先" + (pref === "intl" ? "国际版" : "国内版") + "，失效自动切换）";
   return mode === "intl" ? "仅国际版" : "仅国内版";
+}
+
+// —— 项目新版本检测（运行信息卡片；启动自动检查一次 + 手动「立即检查」） ——
+// 有新版本时同时在顶部标题旁亮出徽标（提醒升级），点击直达 Releases。
+function setUpdateBadge(r){
+  const badge = document.getElementById('updateBadge');
+  if(!badge) return;
+  if(r && r.has_update){
+    badge.textContent = '有新版本 ' + (r.latest || '') + ' → 升级';
+    badge.href = r.url || '#';
+    badge.style.display = 'inline-block';
+  } else {
+    badge.style.display = 'none';
+    badge.textContent = '';
+  }
+}
+
+async function loadUpdateState(force, btn){
+  const state = document.getElementById('updateState');
+  const actions = document.getElementById('updateActions');
+  if(!state) return;
+  if(btn){ btn.disabled = true; btn.textContent = '检查中...'; }
+  state.textContent = '正在检查…';
+  state.style.color = 'var(--dim)';
+  if(actions) actions.innerHTML = '';
+  try{
+    const r = await getJSON('/update/check' + (force ? '?force=1' : ''));
+    if(!r || r.ok === false){
+      state.textContent = '检查失败（网络不可达或 GitHub 受限）';
+      state.style.color = 'var(--warn)';
+      setUpdateBadge(null);
+    } else if(r.no_releases){
+      state.textContent = '仓库暂无发布记录（当前 ' + esc(r.current) + '）';
+      state.style.color = 'var(--dim)';
+      setUpdateBadge(null);
+    } else if(r.has_update){
+      state.innerHTML = '发现新版本 <b style="color:var(--accent)">' + esc(r.latest) + '</b>'
+        + '（当前 ' + esc(r.current) + '）';
+      state.style.color = 'var(--accent)';
+      if(actions && r.url){
+        actions.innerHTML = '<a href="' + esc(r.url) + '" target="_blank" rel="noopener" '
+          + 'style="color:var(--accent);text-decoration:underline">前往 Releases 下载升级 →</a>';
+      }
+      setUpdateBadge(r);      // 顶部徽标提醒升级
+    } else {
+      state.textContent = '已是最新版本（' + esc(r.current) + (r.latest ? (' · 最新 ' + esc(r.latest)) : '') + '）';
+      state.style.color = '#26bb82';
+      setUpdateBadge(null);
+    }
+  }catch(e){
+    state.textContent = '检查失败：' + String((e && e.message) || e);
+    state.style.color = 'var(--warn)';
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '立即检查'; }
+    else if(actions && !actions.innerHTML){
+      actions.innerHTML = '<button class="sec" style="font-size:11px;padding:3px 8px" '
+        + 'onclick="loadUpdateState(true, this)">立即检查</button>';
+    }
+  }
 }
 
 async function setRealmMode(value){
@@ -1229,11 +1306,61 @@ async function switchGrowthAccount(uid){
   await loadGrowthTasks();
 }
 
+// —— 本机虚拟化检测（中文输出）——
+// 官方客户端按设备风控身份下发活动/权益，虚拟化环境会计入风险画像；
+// 这里展示官方风控桥（runtime-info.exe）的判定与本机交叉校验证据。
+async function loadVmState(force){
+  const el = document.getElementById("vmState");
+  if(!el) return;
+  el.textContent = '检测中...';
+  try{
+    const r = await getJSON('/diag/vm' + (force ? '?force=1' : ''));
+    const isVm = !!r.is_vm;
+    el.innerHTML = isVm
+      ? '<span style="color:#e08b2b">虚拟机</span>' + (r.brand_cn ? ' · ' + esc(r.brand_cn) : '')
+      : '<span style="color:#26bb82">物理机</span>';
+    const desc = document.getElementById("vmDesc");
+    if(desc) desc.textContent = isVm
+      ? ('本机虚拟化检测 · 风险档位 ' + esc(r.level || '-'))
+      : '本机虚拟化检测';
+    const ev = document.getElementById("vmEvidence");
+    if(ev){
+      const lines = [];
+      if(r.score !== null && r.score !== undefined) lines.push('风控评分 ' + r.score + '/100');
+      if(r.source === 'local') lines.push('官方风控桥不可用，以下为本机交叉校验');
+      (r.evidence || []).slice(0, 3).forEach(function(x){ lines.push(String(x)); });
+      ev.innerHTML = lines.map(esc).join('<br>');
+    }
+    const card = document.getElementById("cardVmState");
+    if(card) card.title = r.summary || '';
+  }catch(e){
+    const msg = String((e && e.message) || e);
+    const ev = document.getElementById("vmEvidence");
+    if(msg === '404'){
+      // 旧网关进程没有 /diag/vm 路由（本次合并后才有）
+      el.innerHTML = '<span style="color:var(--warn)">需重启网关</span>';
+      const desc = document.getElementById("vmDesc");
+      if(desc) desc.textContent = '本机虚拟化检测（当前网关进程版本较旧）';
+      if(ev) ev.textContent = '该功能需要新版本网关进程：重启网关后点「重新检测」。';
+    } else {
+      el.textContent = '检测失败';
+      if(ev) ev.textContent = msg;
+    }
+  }
+}
+function refreshVmState(btn){
+  if(btn){ btn.disabled = true; btn.textContent = '检测中...'; }
+  Promise.resolve(loadVmState(true)).finally(function(){
+    if(btn){ btn.disabled = false; btn.textContent = '重新检测'; }
+  });
+}
+
 async function loadGrowthTasks(){
   const sec = document.getElementById("sectionGrowthTasks");
   if(!sec) return;
   // 双区域都展示：签到能力由后端运行时探测，接口不存在时任务行会给出原因
   sec.style.display = 'block';
+  loadVmState();
   try{
     const q = (CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all') ? ('?uid=' + encodeURIComponent(CURRENT_GROWTH_UID)) : '';
     const r = await getJSON('/tasks' + q);
@@ -1574,6 +1701,9 @@ function accountRow(a){
               : '<span class="badge ok">可用</span>';
   const err = a.lastError ? '<div class="hint" style="color:var(--warn);margin:2px 0 0">' + esc(a.lastError) + '</div>' : '';
   const cred = a.credits;
+  // 悬停显示快照拉取时间：数据旧不旧一眼可辨（配合上方「刷新积分」）
+  const credTitle = (cred && cred.updated_iso)
+    ? ' title="更新于 ' + esc(cred.updated_iso) + '"' : '';
   const credText = cred ? ('<b style="color:var(--accent2)">' + fmt(cred.remain) + '</b> / ' + fmt(cred.size)) : '<span style="color:var(--dim)">未查询</span>';
   return '<tr>'
     + '<td style="text-align:center;white-space:nowrap">' + realmBadge + '</td>'
@@ -1583,7 +1713,7 @@ function accountRow(a){
     + (a.machineId ? ('<div class="mono" style="color:var(--dim);font-size:10px;margin-top:2px" title="由账号UID稳定派生的专属设备码，防多号关联风控">设备码: ' + esc(a.machineId.slice(0,14)) + '...</div>') : '')
     + err + '</td>'
     + '<td style="text-align:center">' + state + '</td>'
-    + '<td style="text-align:left;white-space:nowrap">' + credText + '</td>'
+    + '<td style="text-align:left;white-space:nowrap"' + credTitle + '>' + credText + '</td>'
     + '<td style="text-align:right">' + fmt(usage.requests) + '</td>'
     + '<td style="text-align:right">' + fmt(usage.total_tokens) + '</td>'
     + '<td style="text-align:right">' + fmt(usage.cached_tokens) + '</td>'
@@ -1658,14 +1788,28 @@ async function loadAccounts(){
 
 async function fetchCredits(btn){
   if(btn){ btn.disabled = true; btn.textContent = '刷新中...'; }
-  const currentView = (window.VIEW_REALM || "intl");
-  const viewName = currentView === 'cn' ? '国内版' : '国际版';
   try{
-    const r = await postJSON('/accounts/credits', {realm: currentView});
+    // 手动刷新 = 全部账号：之前只刷当前页签区域的账号（停在"国际版"页签
+    // 时国内账号纹丝不动），用户会以为"点了没用"。
+    const r = await postJSON('/accounts/credits', {});
     await loadAccounts();
     refresh();
-    const count = (r.results || []).length;
-    toast('已成功刷新当前' + viewName + ' ' + count + ' 个账号的积分', 'ok');
+    await loadGrowthTasks();   // 签到与福利中心的「积分额度余额」卡片同步更新
+    const results = r.results || [];
+    const failed = results.filter(x => !x.ok);
+    if(!results.length){
+      toast('没有可刷新积分的账号', 'warn');
+    } else if(!failed.length){
+      toast('已刷新全部 ' + results.length + ' 个账号的积分', 'ok');
+    } else {
+      // 逐账号结果带回失败原因（网络不通 / 代理不可用 / 凭证失效），
+      // 不再静默吞掉装作成功——那正是"点了没反应也没提示"的来源。
+      const first = failed[0];
+      const why = String(first.error || first.uid || '未知原因').slice(0, 100);
+      toast('已刷新 ' + (results.length - failed.length) + '/' + results.length
+            + ' 个账号；失败 ' + failed.length + ' 个：' + why,
+            (results.length - failed.length) ? 'warn' : 'bad');
+    }
   }catch(e){
     toast('刷新积分失败: ' + e.message, 'bad');
   }finally{
@@ -2474,6 +2618,7 @@ async function startDashboard(){
   await loadGrowthTasks();
   await loadSchedulerStatus();
   await refresh();
+  loadUpdateState();          // 自动检查新版本（不阻塞首屏，失败静默）
   updateRecentLimitButtons();
   const tabFromUrl = new URLSearchParams(window.location.search).get('tab');
   if(tabFromUrl && ['gateway', 'analytics', 'logs', 'settings'].includes(tabFromUrl)){

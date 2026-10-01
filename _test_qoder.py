@@ -989,7 +989,7 @@ def fake_campaigns_404(url, **kw):
 
 
 _A.http_json = fake_campaigns_404
-camp404 = _acc_camp.campaigns()
+camp404 = _acc_camp.campaigns(force=True)   # force 绕过 20s 短缓存，直查上游
 _A.http_json = _orig_hj
 check("campaigns 404 -> ok False + available False (no crash)",
       camp404["ok"] is False and camp404["available"] is False, camp404)
@@ -1583,7 +1583,7 @@ _A_CAMPAIGNS = {
                           "achievement_completed": False, "unavailable_reason": "",
                           "placements": []}]},
 }
-A.Account.campaigns = lambda self: dict(_A_CAMPAIGNS[self.realm])
+A.Account.campaigns = lambda self, force=False: dict(_A_CAMPAIGNS[self.realm])
 A.Account.fetch_credits = lambda self: {"ok": True, "credits": {}}
 A.Account.fetch_plan = lambda self: ""
 A.Account.pro_eligibility = lambda self: (True, False)
@@ -1736,7 +1736,7 @@ def _stub_claim(self, campaign_id):
 
 
 A.Account.claim_campaign = _stub_claim
-A.Account.campaigns = lambda self: {
+A.Account.campaigns = lambda self, force=False: {
     "ok": True, "available": True, "show_campaign": True, "claimable": True,
     "campaign_url": "https://openapi.qoder.com.cn/growth-page/activity-iframe",
     "campaigns": [
@@ -1772,7 +1772,7 @@ check("campaign_checkin message names the claimed campaign",
       "act-daily-100" in _res20["message"], _res20["message"])
 
 # --- 20.3 幂等：上游 replayed=true 视为已领取而不是新领取 ---
-A.Account.campaigns = lambda self: {
+A.Account.campaigns = lambda self, force=False: {
     "ok": True, "available": True, "show_campaign": True, "claimable": True,
     "campaign_url": "", "campaigns": [
         {"campaign_id": "c9", "campaign_key": "act-x",
@@ -2413,6 +2413,328 @@ finally:
     P.ACCOUNTS_DIR = _orig_dir26
     import shutil as _sh26
     _sh26.rmtree(_TD26, ignore_errors=True)
+
+print()
+print("[27] ported upstream fixes: BLOCKED dedup / gated rows / VM / update check / task cache")
+
+# ---- 同人去重（BLOCKED / SAME_PERSON_ALREADY_CLAIMED） ----
+_BLOCKED_BODY = {"status": "BLOCKED", "replayed": False,
+                 "failureCode": "SAME_PERSON_ALREADY_CLAIMED",
+                 "benefit": {"kind": "CREDITS", "amount": 100}}
+
+
+def fake_blocked_flow(url, **kw):
+    if "daily-check-in/status" in url:
+        raise _ue2.HTTPError(url, 404, "nf", {}, _io2.BytesIO(b""))
+    if url.endswith("/campaigns"):
+        return _credit_campaigns_payload()
+    if "/campaigns/c-1/claim" in url:
+        return dict(_BLOCKED_BODY)
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_orig_hj27 = _A.http_json
+_A.http_json = fake_blocked_flow
+_acc_blk = _A.Account({"uid": "blk-1", "realm": "intl", "accessToken": "dt-x"})
+_cc_blk = _acc_blk.campaign_checkin(gap=0)
+_A.http_json = _orig_hj27
+check("BLOCKED classified, never counted as claimed/earned",
+      _cc_blk.get("blocked") and not _cc_blk.get("claimed")
+      and _cc_blk.get("earned") == 0, _cc_blk)
+check("BLOCKED keeps ok=True and explains the person-level dedup",
+      _cc_blk.get("ok") is True and "同人" in _cc_blk.get("message", ""),
+      _cc_blk.get("message"))
+check("BLOCKED failure_code surfaced",
+      _cc_blk["blocked"][0].get("failure_code") == "SAME_PERSON_ALREADY_CLAIMED",
+      _cc_blk["blocked"])
+
+
+def fake_blocked_claim_only(url, **kw):
+    if "/campaigns/c-1/claim" in url:
+        return dict(_BLOCKED_BODY)
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_blocked_claim_only
+_acc_blk2 = _A.Account({"uid": "blk-2", "realm": "intl", "accessToken": "dt-x"})
+_res_blk2 = _acc_blk2.claim_campaign("c-1")
+check("claim_campaign: BLOCKED -> ok False + blocked True (no false success)",
+      _res_blk2.get("ok") is False and _res_blk2.get("blocked") is True
+      and _res_blk2.get("failure_code") == "SAME_PERSON_ALREADY_CLAIMED",
+      _res_blk2)
+
+
+def fake_empty_claim(url, **kw):
+    return {"foo": "bar"}
+
+
+_A.http_json = fake_empty_claim
+_acc_blk3 = _A.Account({"uid": "blk-3", "realm": "intl", "accessToken": "dt-x"})
+_res_blk3 = _acc_blk3.claim_campaign("c-1")
+_A.http_json = _orig_hj27
+check("claim_campaign: 200 without an explicit status is NOT a success anymore",
+      _res_blk3.get("ok") is False, _res_blk3)
+
+# checkin() 的兜底翻译：BLOCKED -> ok=True（不是错误），带说明
+_A.http_json = fake_blocked_flow
+_acc_blk4 = _A.Account({"uid": "blk-4", "realm": "intl", "accessToken": "dt-x"})
+_res_blk4 = _acc_blk4.checkin()
+_A.http_json = _orig_hj27
+check("checkin(): blocked maps to ok=True + blocked flag (button not alarmed)",
+      _res_blk4.get("ok") and _res_blk4.get("campaign")
+      and _res_blk4.get("blocked"), _res_blk4)
+
+# ---- 成就门控活动行 ----
+_gated_camp = {
+    "ok": True, "available": True, "show_campaign": True, "claimable": False,
+    "campaign_url": "https://qoder.com.cn/growth-page/activity-iframe",
+    "campaigns": [{"campaign_id": "c-g", "campaign_key": "act-20260928-620",
+                   "action_type": "CLAIM_BENEFIT",
+                   "claim_status": "ACHIEVEMENT_NOT_COMPLETED",
+                   "start_at": 0, "end_at": 0,
+                   "benefit": {"kind": "CREDITS", "amount": 100},
+                   "required_achievement_key": "sites_first_use",
+                   "achievement_completed": False,
+                   "unavailable_reason": "", "placements": []}],
+    "identity": "native",
+}
+_row_g = T._campaign_task_row(_A.Account({"uid": "g-1", "realm": "cn"}),
+                              _gated_camp, {})
+check("achievement-gated campaign renders with its requirement",
+      _row_g["status"] == "not_accepted"
+      and "sites_first_use" in _row_g["description"]
+      and _row_g["reward_credit"] == 100, _row_g)
+
+_no_camp = {"ok": True, "available": True, "show_campaign": False,
+            "claimable": False, "campaign_url": "", "campaigns": [],
+            "identity": "native"}
+_row_n = T._campaign_task_row(_A.Account({"uid": "n-1", "realm": "cn"}),
+                              _no_camp, {})
+check("empty campaign list hints at the common causes (定向/VM/资格)",
+      "虚拟机" in _row_n["description"] and "定向" in _row_n["description"],
+      _row_n["description"])
+
+# ---- 虚拟化状态（中文） ----
+import qoder_fingerprint as _F27
+check("vm level mapping thresholds",
+      [_F27._vm_level_cn(v) for v in (0, 30, 55, 77, None)]
+      == ["无", "低", "中", "高", "未知"],
+      [_F27._vm_level_cn(v) for v in (0, 30, 55, 77, None)])
+check("vm brand mapping -> Chinese name",
+      _F27.vm_brand_cn("hyper-v") == "Hyper-V（微软）"
+      and _F27.vm_brand_cn("VirtualBox") == "Oracle VirtualBox"
+      and _F27.vm_brand_cn("unknown-brand") == "unknown-brand")
+_orig_ev27 = _F27._local_vm_evidence
+_F27._local_vm_evidence = lambda: (["证据1"], "")
+try:
+    _st_vm = _F27.vm_status(bridge_vm_info={"isVm": True, "percentage": 77,
+                                            "brand": "hyper-v",
+                                            "vmTypeCode": 3})
+    check("bridge vmInfo wins and produces the Chinese summary",
+          _st_vm["is_vm"] and _st_vm["source"] == "runtime-info"
+          and _st_vm["level"] == "高" and "Hyper-V" in _st_vm["summary"],
+          _st_vm)
+    _st_loc = _F27.vm_status(bridge_vm_info=None, bridge_available=False)
+    check("no bridge -> local cross-check fallback is flagged",
+          _st_loc["source"] == "local" and "本机交叉校验" in _st_loc["summary"],
+          _st_loc)
+finally:
+    _F27._local_vm_evidence = _orig_ev27
+
+check("diag/update routes require the panel session",
+      P.Handler._is_panel_route("/diag/vm")
+      and P.Handler._is_panel_route("/update/check"))
+
+# ---- 版本比较 + 更新检查三态 ----
+check("version tuple tolerates prefixes and odd shapes",
+      P.version_tuple("v1.2.3") == (1, 2, 3)
+      and P.version_tuple("1.10.0") > P.version_tuple("1.9.9")
+      and P.version_tuple("") == (0, 0, 0),
+      (P.version_tuple("v1.2.3"), P.version_tuple("1.10.0")))
+
+
+class _FakeUpdateResp(object):
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_orig_urlopen27 = qoder_net.urlopen
+_orig_upd_cache27 = dict(P._update_cache)
+try:
+    P._update_cache.update({"at": 0.0, "data": None})
+    qoder_net.urlopen = lambda req, timeout=None: _FakeUpdateResp(
+        json.dumps({"tag_name": "v99.0.0", "html_url": "https://x/y",
+                    "published_at": "", "name": "n"}).encode())
+    _upd = P.check_for_update(force=True)
+    check("update check: newer tag -> has_update with link",
+          _upd["ok"] and _upd["has_update"] and _upd["latest"] == "v99.0.0"
+          and _upd["url"] == "https://x/y", _upd)
+    qoder_net.urlopen = lambda req, timeout=None: _FakeUpdateResp(
+        json.dumps({"tag_name": "v0.0.1"}).encode())
+    _upd2 = P.check_for_update(force=True)
+    check("update check: older tag -> no update, no false alarm",
+          _upd2["ok"] and not _upd2["has_update"], _upd2)
+
+    def _raise_404(req, timeout=None):
+        raise _ue2.HTTPError(getattr(req, "full_url", "u"), 404, "nf", {}, None)
+    qoder_net.urlopen = _raise_404
+    _upd3 = P.check_for_update(force=True)
+    check("update check: 404 (no releases yet) is not treated as an error",
+          _upd3["ok"] and _upd3["no_releases"] and not _upd3["has_update"], _upd3)
+
+    def _raise_net(req, timeout=None):
+        raise OSError("network down")
+    qoder_net.urlopen = _raise_net
+    _upd4 = P.check_for_update(force=True)
+    check("update check: network failure -> ok False (shows 检查失败, not fake update)",
+          _upd4["ok"] is False and not _upd4["has_update"]
+          and _upd4["error"], _upd4)
+finally:
+    qoder_net.urlopen = _orig_urlopen27
+    P._update_cache.update(_orig_upd_cache27)
+
+# ---- /tasks 面板短缓存（命中 + 失效） ----
+T.invalidate_panel_cache()
+_calls27 = {"campaigns": 0, "status": 0, "pro": 0, "credits": 0, "plan": 0}
+_acc_c27 = _A.Account({"uid": "cache-27", "realm": "cn", "accessToken": "dt-x"})
+
+
+def _mk_counter(name, result):
+    def _fn(*a, **kw):
+        _calls27[name] += 1
+        return result
+    return _fn
+
+
+_acc_c27.campaigns = _mk_counter("campaigns", _no_camp)
+_acc_c27.checkin_status = _mk_counter("status", (True, {
+    "streak_days": 0, "total_claim_days": 0, "today_checked_in": True,
+    "active": True, "reward_credits": 100}))
+_acc_c27.pro_eligibility = _mk_counter("pro", (True, False))
+_acc_c27.fetch_credits = _mk_counter("credits", {"ok": True})
+_acc_c27.fetch_plan = _mk_counter("plan", "Free")
+_first27 = T._fetch_upstream_parallel(_acc_c27)
+_second27 = T._fetch_upstream_parallel(_acc_c27)
+check("panel cache: second view build within 20s hits the cache",
+      _calls27 == {"campaigns": 1, "status": 1, "pro": 1, "credits": 1, "plan": 1},
+      _calls27)
+T.invalidate_panel_cache()
+T._fetch_upstream_parallel(_acc_c27)
+check("panel cache: invalidate (after check-in/claim) forces a fresh fetch",
+      _calls27["campaigns"] == 2, _calls27)
+
+# ---- campaigns 短缓存：命中 + force 绕过 ----
+_orig_hj27b = _A.http_json
+_camp_calls27 = {"n": 0}
+
+
+def fake_camp_count(url, **kw):
+    if url.endswith("/campaigns"):
+        _camp_calls27["n"] += 1
+        return _credit_campaigns_payload()
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_camp_count
+_acc_cc27 = _A.Account({"uid": "camp-cache-27", "realm": "cn",
+                        "accessToken": "dt-x"})
+_acc_cc27.campaigns()
+_acc_cc27.campaigns()
+check("campaigns(): 20s short cache reuses the payload", _camp_calls27["n"] == 1,
+      _camp_calls27)
+_acc_cc27.campaigns(force=True)
+_A.http_json = _orig_hj27b
+check("campaigns(force=True) bypasses the short cache", _camp_calls27["n"] == 2,
+      _camp_calls27)
+check("identity + campaigns cache TTL constants match the ported design",
+      _A.NATIVE_IDENTITY_TTL == 1800 and _A.CAMPAIGNS_TTL == 20,
+      (_A.NATIVE_IDENTITY_TTL, _A.CAMPAIGNS_TTL))
+
+print()
+print("[28] cross-realm runtime-info bridge (intl borrows cn when own client is absent)")
+
+_orig_did28 = A.desktop_install_dir
+_orig_home28 = A._realm_home_dir
+_orig_realmpaths28 = A._realm_runtime_info_paths
+_orig_exe_cache28 = dict(A._native_exe_cache)
+_orig_env28 = os.environ.get("QD_NATIVE_IDENTITY")
+_orig_env_path28 = os.environ.pop("QD_RUNTIME_INFO", None)
+try:
+    _IN28 = r"C:\fake\intl"
+    _CN28 = r"C:\fake\cn"
+    A.desktop_install_dir = lambda r: {"intl": _IN28, "cn": _CN28}.get(r, "")
+    A._realm_home_dir = lambda r: r"C:\fake\home-" + r
+    _cands_i = A.candidate_runtime_info_paths("intl")
+    _cands_c = A.candidate_runtime_info_paths("cn")
+    check("candidates: own realm first, borrowed realm appended",
+          _cands_i[0] == os.path.join(_IN28, "resources", "umid", "runtime-info.exe")
+          and _cands_i[-1] == os.path.join(_CN28, "resources", "umid", "runtime-info.exe")
+          and len(_cands_i) == 2, _cands_i)
+    check("candidates: cn search order is cn -> intl too",
+          _cands_c[0].startswith(_CN28) and _cands_c[-1].startswith(_IN28),
+          _cands_c)
+    check("candidates: no duplicates", len(set(_cands_i)) == len(_cands_i))
+
+    _real28 = os.path.abspath("README.md")     # any existing file works as the "exe"
+    os.environ["QD_NATIVE_IDENTITY"] = "1"
+    A._native_exe_cache.clear()
+    A._realm_runtime_info_paths = \
+        lambda r: [_real28] if r == "cn" else [r"C:\nope\runtime-info.exe"]
+    _path_i, _src_i = A._runtime_info_resolution("intl")
+    check("intl borrows the cn bridge when its own client is missing",
+          _path_i == _real28 and _src_i == "cn", (_path_i, _src_i))
+
+    A._native_exe_cache.clear()
+    A._realm_runtime_info_paths = \
+        lambda r: [_real28] if r == "intl" else [r"C:\nope\runtime-info.exe"]
+    _path_c, _src_c = A._runtime_info_resolution("intl")
+    check("own-realm bridge wins over the borrowed one",
+          _path_c == _real28 and _src_c == "intl", (_path_c, _src_c))
+
+    os.environ["QD_NATIVE_IDENTITY"] = "0"
+    A._native_exe_cache.clear()
+    check("QD_NATIVE_IDENTITY=0 still disables both bridge and borrow",
+          A._runtime_info_resolution("intl") == ("", ""))
+finally:
+    A.desktop_install_dir = _orig_did28
+    A._realm_home_dir = _orig_home28
+    A._realm_runtime_info_paths = _orig_realmpaths28
+    A._native_exe_cache.clear()
+    A._native_exe_cache.update(_orig_exe_cache28)
+    if _orig_env28 is None:
+        os.environ.pop("QD_NATIVE_IDENTITY", None)
+    else:
+        os.environ["QD_NATIVE_IDENTITY"] = _orig_env28
+    if _orig_env_path28 is not None:
+        os.environ["QD_RUNTIME_INFO"] = _orig_env_path28
+
+# 本机实测（有桥才比较；没有桥时确认是干净的空值而不是异常）
+os.environ["QD_NATIVE_IDENTITY"] = "1"
+A._native_exe_cache.clear()
+_exe_i28 = A.runtime_info_exe("intl")
+_exe_c28 = A.runtime_info_exe("cn")
+if _exe_c28:
+    check("on this machine intl shares the cn bridge (machine identity is realm-free)",
+          _exe_i28 == _exe_c28 and bool(_exe_i28), (_exe_i28, _exe_c28))
+    check("bridge realm tag says the bridge came from cn",
+          A.runtime_info_bridge_realm("intl") == "cn",
+          A.runtime_info_bridge_realm("intl"))
+else:
+    check("no official bridge on this machine -> intl resolves to empty (no crash)",
+          _exe_i28 == "")
+if _orig_env28 is None:
+    os.environ.pop("QD_NATIVE_IDENTITY", None)
+else:
+    os.environ["QD_NATIVE_IDENTITY"] = _orig_env28
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

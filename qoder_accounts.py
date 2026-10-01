@@ -28,7 +28,8 @@ from pathlib import Path
 import uuid
 
 from qoder_fingerprint import (derive_id, generate_request_id,
-                               derive_machine_token, derive_machine_type)
+                               derive_machine_token, derive_machine_type,
+                               vm_status)
 import qoder_net
 
 # ---------------------------------------------------------------------------
@@ -126,12 +127,17 @@ def desktop_version():
 # 服务端**按这些值过滤设备定向活动**：派生的假身份不会报错，但活动列表里
 # 会静默少掉"每日领取 100 Credits"这类条目（实测：换用原生身份后立刻出现
 # CLAIMABLE 活动）。因此网关优先调用同一个官方二进制取真值，失败才回退派生值。
-# 原生身份缓存：**身份会轮换**（实测十几分钟内 token/type/code 就变了），
-# 所以只做短缓存，并在"列表显示活动被过滤"时强制刷新重试一次。
-# 注意：身份是**机器级**的（不同账号/不存在的账号 id 都返回同一份），
-# 因此按区域缓存即可，同一台机器上的多个账号共用是正确的。
-NATIVE_IDENTITY_TTL = 120
-_native_exe_cache = {}
+# 原生身份缓存：身份会随时间轮换，但**旧身份仍被服务端接受**（上游实测复用
+# 后依然 showCampaign=true），真正的成本是每次强制刷新要跑约 3.7 秒的官方
+# 二进制——这正是首屏/切视图卡顿的来源。因此做长缓存（30 分钟），并用
+# "列表被判为未认可时刷新重试一次"（campaigns() 内）与"领取前强制刷新"
+# （campaign_checkin）兜底自愈。
+# 注意：身份是**机器级**的（不同账号/不存在的账号 id/甚至不同区域都返回同一份，
+# 实测一致），因此按区域缓存即可，同一台机器上的多个账号共用是正确的；
+# **本区域没装客户端时借用另一区域的桥**（如只装了国内版客户端时，国际版账号
+# 也能拿到真实身份，不再退化为派生假值——见 _realm_search_order）。
+NATIVE_IDENTITY_TTL = 1800
+_native_exe_cache = {}      # realm -> (exe路径, 桥来源区域)
 _native_ident_cache = {}
 
 
@@ -177,33 +183,153 @@ def desktop_install_dir(realm):
     return ""
 
 
+def _realm_search_order(realm):
+    """找风控桥的区域搜索顺序：本区域优先，其次借用另一区域。
+
+    机器身份是**机器级、与区域无关**的：实测同一台机器上，国内账号与国际账号
+    走同一个桥取到的 machineToken/machineType/machineCode **完全一致**（桥的
+    输出里也没有任何区域字段）。因此本机只装了国内版客户端时，国际版账号
+    借用国内版的桥是安全的——这正是"国际账号一直在用派生假身份"的修复。
+    """
+    return ("cn", "intl") if realm == "cn" else ("intl", "cn")
+
+
+def _realm_home_dir(r):
+    """该区域 CLI/agent 的用户目录（.qoder-cn / .qoder）。"""
+    return os.path.join(os.path.expanduser("~"),
+                        ".qoder-cn" if r == "cn" else ".qoder")
+
+
+def _realm_runtime_info_paths(r):
+    """单区域的桥候选来源（不跨区借用）：
+      1) 桌面端安装目录 `<install>/resources/umid/runtime-info.exe`；
+      2) CLI/agent 缓存 `~/.qoder-cn(.qoder)/.bin/umid-*/runtime-info.exe`
+         （只跑过 CLI、没装桌面端时也有）。
+    """
+    out = []
+    d = desktop_install_dir(r)
+    if d:
+        out.append(os.path.join(d, "resources", "umid", "runtime-info.exe"))
+    bin_dir = os.path.join(_realm_home_dir(r), ".bin")
+    try:
+        names = sorted(os.listdir(bin_dir))
+    except Exception:
+        names = []
+    for name in names:
+        if name.startswith("umid"):
+            out.append(os.path.join(bin_dir, name, "runtime-info.exe"))
+    return out
+
+
+def _runtime_info_candidates(realm):
+    """(路径, 来源区域) 列表：本区域在前、借用区域在后，去重保序。"""
+    seen, out = set(), []
+    for r in _realm_search_order(realm):
+        for cand in _realm_runtime_info_paths(r):
+            key = cand.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((cand, r))
+    return out
+
+
+def candidate_runtime_info_paths(realm):
+    """按优先级列出该区域可用的 runtime-info.exe 路径（不校验存在性）。"""
+    return [p for p, _r in _runtime_info_candidates(realm)]
+
+
+def _runtime_info_resolution(realm):
+    """定位风控桥，返回 (exe路径, 桥来源区域)，按区域缓存。
+
+    来源区域：'cn'/'intl'（真实区域）、'explicit'（QD_RUNTIME_INFO 指定）、
+    ''（未找到）。QD_NATIVE_IDENTITY=0 关闭全部原生桥（返回空）。
+    """
+    if (os.environ.get("QD_NATIVE_IDENTITY") or "1").strip() in ("0", "false", "no"):
+        return "", ""
+    if realm in _native_exe_cache:
+        return _native_exe_cache[realm]
+    resolved = ("", "")
+    explicit = (os.environ.get("QD_RUNTIME_INFO") or "").strip()
+    if explicit and os.path.isfile(explicit):
+        resolved = (explicit, "explicit")
+    else:
+        for cand, r in _runtime_info_candidates(realm):
+            if os.path.isfile(cand):
+                resolved = (cand, r)
+                break
+    _native_exe_cache[realm] = resolved
+    return resolved
+
+
 def runtime_info_exe(realm):
     """定位官方 runtime-info.exe（原生风控身份桥）；找不到返回空串。
 
-    可用 QD_NATIVE_IDENTITY=0 关闭（测试/受限环境不希望拉起客户端二进制时）。
+    可用 QD_NATIVE_IDENTITY=0 关闭；QD_RUNTIME_INFO=<路径> 显式指定。
+    本区域没装客户端时借用另一区域的桥（详见 `_realm_search_order`）。
     """
-    if (os.environ.get("QD_NATIVE_IDENTITY") or "1").strip() in ("0", "false", "no"):
-        return ""
-    if realm in _native_exe_cache:
-        return _native_exe_cache[realm]
-    exe = ""
-    roots = [os.path.join(desktop_install_dir(realm), "resources", "umid")]
-    found = ""
-    for root in roots:
-        cand = os.path.join(root, "runtime-info.exe")
-        if os.path.isfile(cand):
-            found = cand
-            break
-    _native_exe_cache[realm] = found
-    return found
+    return _runtime_info_resolution(realm)[0]
+
+
+def runtime_info_bridge_realm(realm):
+    """当前实际使用的桥来自哪个区域（'cn'/'intl'/'explicit'/''）。"""
+    return _runtime_info_resolution(realm)[1]
+
+
+def run_runtime_info(realm, account_id=""):
+    """调用官方 runtime-info.exe，返回其 JSON（失败返回 {}）。
+
+    account 为空串同样可用：机器身份是机器级的，活动平台之外（如虚拟化
+    体检 _diag_campaign.py / 看板卡片）不需要账号上下文。
+    """
+    exe = runtime_info_exe(realm)
+    if not exe:
+        return {}
+    try:
+        import subprocess
+        proc = subprocess.run(
+            [exe, "prod", "--account-stdin"],
+            input=json.dumps({"account": account_id or ""}).encode("utf-8") + b" ",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25,
+            cwd=os.path.dirname(exe))
+        out = proc.stdout.decode("utf-8", "replace").strip()
+        if out:
+            return json.loads(out.split("\n", 1)[0])
+    except Exception:
+        pass
+    return {}
+
+
+_vm_cache = {}
+
+
+def local_vm_status(realm=None, force=False):
+    """本机虚拟化状态（**中文输出**）：看板与 _diag_campaign.py 共用。
+
+    优先用官方风控桥的 vmInfo（官方客户端就是这么判的），桥不可用时退化为
+    本机交叉校验（CPU 型号 / 系统制造商 / 虚拟化驱动文件）。结果缓存 300s。
+    """
+    r = realm if realm in ("cn", "intl") else "cn"
+    now = time.time()
+    hit = _vm_cache.get(r)
+    if hit and not force and now - hit[0] < 300:
+        return hit[1]
+    data = run_runtime_info(r)
+    vm_info = data.get("vmInfo") if isinstance(data.get("vmInfo"), dict) else {}
+    st = vm_status(bridge_vm_info=vm_info, bridge_available=bool(runtime_info_exe(r)))
+    st["realm"] = r
+    st["bridge_available"] = bool(runtime_info_exe(r))
+    st["bridge_realm"] = runtime_info_bridge_realm(r)
+    _vm_cache[r] = (now, st)
+    return st
 
 
 def native_machine_identity(realm, account_id, force=False):
     """调用官方原生桥取真实机器身份；任何失败返回 {}（调用方回退派生值）。
 
-    身份是**机器级**的（实测不同 account id 返回同一份），按区域短缓存
-    NATIVE_IDENTITY_TTL 秒——它会随时间轮换，长缓存会拿到过期身份导致活动
-    列表被过滤；force=True 时跳过缓存重新取值。
+    身份是**机器级**的（实测不同 account id / 不同区域返回同一份），按区域
+    缓存 NATIVE_IDENTITY_TTL 秒（长缓存；旧身份实测仍被服务端接受）；
+    force=True 时跳过缓存重新取值（领取路径强制刷新，见 campaign_checkin）。
     """
     now = time.time()
     if not force:
@@ -211,28 +337,19 @@ def native_machine_identity(realm, account_id, force=False):
         if hit and now - hit[0] < NATIVE_IDENTITY_TTL:
             return hit[1]
     ident = {}
-    exe = runtime_info_exe(realm)
-    if exe and account_id:
-        try:
-            import subprocess
-            proc = subprocess.run(
-                [exe, "prod", "--account-stdin"],
-                input=json.dumps({"account": account_id}).encode("utf-8") + b" ",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25,
-                cwd=os.path.dirname(exe))
-            out = proc.stdout.decode("utf-8", "replace").strip()
-            if out:
-                data = json.loads(out.split("\n", 1)[0])
-                token = str(data.get("machineToken") or "").strip()
-                mtype = str(data.get("machineType") or "").strip()
-                code = str(data.get("machineCode") or "").strip()
-                if token and mtype and code:
-                    ident = {"machineToken": token, "machineType": mtype,
-                             "machineCode": code,
-                             "vm": bool((data.get("vmInfo") or {}).get("isVm")),
-                             "source": "runtime-info"}
-        except Exception:
-            ident = {}
+    data = run_runtime_info(realm, account_id)
+    if data:
+        token = str(data.get("machineToken") or "").strip()
+        mtype = str(data.get("machineType") or "").strip()
+        code = str(data.get("machineCode") or "").strip()
+        vm_info = data.get("vmInfo") if isinstance(data.get("vmInfo"), dict) else {}
+        if token and mtype and code:
+            ident = {"machineToken": token, "machineType": mtype,
+                     "machineCode": code,
+                     "vm": bool(vm_info.get("isVm")),
+                     "vm_info": vm_info,
+                     "bridge_realm": runtime_info_bridge_realm(realm),
+                     "source": "runtime-info"}
     _native_ident_cache[realm] = (now, ident)
     return ident
 
@@ -240,6 +357,12 @@ def native_machine_identity(realm, account_id, force=False):
 # 打一个必然失败的请求；到期自动重探，官方上线即可自动恢复。
 CHECKIN_PROBE_TTL = 6 * 3600
 CHECKIN_REASON_NOT_FOUND = "checkin_endpoint_not_found"
+# 账号文件写入锁：/tasks 面板接口会并行刷新同一账号的多个字段（credits/plan/…），
+# 每个都可能触发 save()，同一 tmp 路径被两个线程同时写会落出坏 JSON。
+_SAVE_LOCK = threading.Lock()
+# 活动列表缓存 TTL：活动状态变化很慢（每日一轮），20 秒内复用可让看板切换视图
+# /账号不再等那 1–4 秒的上游请求；领取动作会 force=True 绕过并立即失效缓存。
+CAMPAIGNS_TTL = 20
 
 # 会话死亡标记：上游主动吊销离线会话，刷新已无意义，需要重新登录。
 SESSION_DEAD_MARKERS = ("TOKEN_EXPIRE", "12153", "Offline user session not found")
@@ -440,6 +563,9 @@ class Account(object):
         self._checkin_cap_at = 0.0
         # 最近一次 campaign 平台状态快照（/sash/api/v1/me/campaigns）
         self.campaign_status = None
+        # 活动列表短缓存 (at, payload)：该请求约 1–4 秒（上游最慢的一环），
+        # 看板切换视图/账号会连续取，缓存后由"领取动作"显式失效。
+        self._campaigns_cache = None
         # 活动平台用的机器身份来源：native(官方原生桥) / derived(派生回退)
         self.machine_identity_source = "derived"
 
@@ -513,9 +639,13 @@ class Account(object):
         tmp = base / (name + ".tmp")
         if not (path.is_relative_to(base) and tmp.is_relative_to(base)):
             raise ValueError("invalid path for account save")
-        tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        # 并发保护：/tasks 面板接口会并行刷新同一账号的多个字段，每个都可能
+        # 触发 save；同一 tmp 路径被两个线程同时写会落出坏 JSON。
+        with _SAVE_LOCK:
+            tmp.write_text(json.dumps(self.to_dict(), ensure_ascii=False,
+                                      indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, path)
         self.path = str(path)
         return self.path
 
@@ -898,7 +1028,7 @@ class Account(object):
         except Exception as exc:
             return None, 0, str(exc)
 
-    def campaigns(self):
+    def campaigns(self, force=False):
         """GET /sash/api/v1/me/campaigns -> 官方活动平台状态（双区域通用）。
 
         官方把"每日领取 100 Credits"等限时活动搬到了 campaign 平台，取列表要
@@ -908,10 +1038,16 @@ class Account(object):
 
         机器身份会轮换：若本次 `showCampaign=false`（通常意味着身份被判定为
         非官方客户端），强制刷新一次身份并重试，避免缓存过期导致整天领不到。
+        结果短缓存 CAMPAIGNS_TTL 秒（force=True 绕过）——该请求是上游最慢的
+        一环，看板切换视图时不该重复等它。
 
         返回 {ok, available, show_campaign, claimable, campaign_url, campaigns,
               identity}，每条活动含 action_type / claim_status / benefit / end_at。
         """
+        now = time.time()
+        if not force and self._campaigns_cache \
+                and now - self._campaigns_cache[0] < CAMPAIGNS_TTL:
+            return self._campaigns_cache[1]
         q, code, err = self._campaigns_get()
         if isinstance(q, dict) and not q.get("showCampaign") \
                 and getattr(self, "machine_identity_source", "") == "native":
@@ -957,6 +1093,7 @@ class Account(object):
             "identity": getattr(self, "machine_identity_source", "derived"),
         }
         self.campaign_status = st
+        self._campaigns_cache = (time.time(), st)
         return st
 
     def campaign_reward(self, campaign_id):
@@ -972,8 +1109,12 @@ class Account(object):
     def claim_campaign(self, campaign_id):
         """POST …/campaigns/{id}/claim -> 领取该活动奖励（官方幂等语义）。
 
-        返回 {ok, status, replayed, grant_id, amount, message}；
-        已领取时上游返回 status=CLAIMED + replayed=true（不会重复发放）。
+        返回 {ok, status, replayed, failure_code, grant_id, amount, message}。
+        服务端按"人"去重（同一机器指纹下的多账号合并为一人，实测）：
+          - 已领取 -> status=CLAIMED + replayed=true（幂等，不重复发放）；
+          - 同人已领 -> status=BLOCKED + failureCode=SAME_PERSON_ALREADY_CLAIMED
+            （同机多号共享每轮一次的额度，第二个号会被 BLOCKED 且列表里
+            隐藏该活动——官方文档写"每账号"，实际执行是"每人"）。
         """
         cfg = get_realm_config(self.realm)
         url = cfg["openapi"] + (PATH_CAMPAIGN_CLAIM % campaign_id)
@@ -996,13 +1137,24 @@ class Account(object):
             return {"ok": False, "error": "HTTP %d %s" % (exc.code, body[:160])}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        status = str(r.get("status") or "")
+        status = str(r.get("status") or "").upper()
+        failure = str(r.get("failureCode") or "").upper()
+        if failure == "SAME_PERSON_ALREADY_CLAIMED" or status == "BLOCKED":
+            return {"ok": False, "blocked": True, "status": status or "BLOCKED",
+                    "replayed": False, "failure_code": failure or "BLOCKED",
+                    "amount": int(((r.get("benefit") or {})
+                                   if isinstance(r.get("benefit"), dict)
+                                   else {}).get("amount") or 0),
+                    "message": "同人已领取（同一设备/身份下其他账号本轮已领，"
+                               "服务端按人去重）",
+                    "raw": r}
         if not status and r.get("success") is False:
             return {"ok": False, "error": str(r.get("error") or r)[:160]}
         return {
-            "ok": status.upper() in ("CLAIMED", "GRANTED", "SUCCESS") or bool(r),
+            "ok": status in ("CLAIMED", "GRANTED", "SUCCESS"),
             "status": status,
             "replayed": bool(r.get("replayed")),
+            "failure_code": failure or "",
             "grant_id": str(r.get("grantId") or ""),
             "amount": int(((r.get("benefit") or {}) if isinstance(r.get("benefit"), dict)
                            else {}).get("amount") or r.get("amount") or 0),
@@ -1021,11 +1173,11 @@ class Account(object):
           - 无可领取项且没有任何活动 -> ok=True + message 说明
         """
         native_machine_identity(self.realm, self.uid, force=True)
-        st = self.campaigns()
+        st = self.campaigns(force=True)      # 领取路径必须绕过缓存，看最新状态
         if not st.get("ok"):
             return {"ok": False, "error": st.get("error") or "campaigns 查询失败",
-                    "earned": 0, "claimed": [], "already": []}
-        claimed, already, earned, errors = [], [], 0, []
+                    "earned": 0, "claimed": [], "already": [], "blocked": []}
+        claimed, already, earned, errors, blocked = [], [], 0, [], []
         for c in st["campaigns"]:
             if c["claim_status"] == "CLAIMED":
                 already.append(c)
@@ -1044,6 +1196,10 @@ class Account(object):
                     claimed.append(c)
                     earned += int(amount or 0)
                 time.sleep(max(0.0, gap))
+            elif res.get("blocked"):
+                # 服务端按"人"去重：同机器/同身份下其他账号本轮已领
+                blocked.append({"campaign": c["campaign_key"] or c["campaign_id"],
+                                "failure_code": res.get("failure_code")})
             else:
                 errors.append("%s: %s" % (c["campaign_key"] or c["campaign_id"],
                                           res.get("error")))
@@ -1051,6 +1207,9 @@ class Account(object):
             msg = "活动领取成功 +%d Credits（%s）" % (
                 earned, ", ".join(c["campaign_key"] or c["campaign_id"]
                                   for c in claimed))
+        elif blocked:
+            msg = ("同人已领取：同一设备/身份下的其他账号本轮已领过（服务端按人去重，"
+                   "failureCode=%s）" % blocked[0].get("failure_code"))
         elif already:
             msg = "今日活动奖励已领取（%s）" % ", ".join(
                 c["campaign_key"] or c["campaign_id"] for c in already)
@@ -1058,9 +1217,11 @@ class Account(object):
             msg = "活动领取失败：%s" % "; ".join(errors)[:200]
         else:
             msg = "当前账号暂无可领取的官方活动"
+        # 领取动作会改变活动状态：让下一次列表查询重新拉取（不吃 20s 缓存）
+        self._campaigns_cache = None
         return {"ok": not errors, "claimed": claimed, "already": already,
-                "earned": earned, "message": msg, "campaigns": st["campaigns"],
-                "errors": errors}
+                "blocked": blocked, "earned": earned, "message": msg,
+                "campaigns": st["campaigns"], "errors": errors}
 
     def _campaign_checkin_result(self):
         """旧签到接口不可用/停用时改走活动平台（checkin() 的兜底分支）。
@@ -1074,6 +1235,10 @@ class Account(object):
         if camp.get("claimed"):
             return {"ok": True, "campaign": True,
                     "reward_credits": int(camp.get("earned") or 0),
+                    "msg": camp.get("message")}
+        if camp.get("blocked"):
+            # 同人去重不算失败：本轮该"人"的额度已被其他账号领走
+            return {"ok": True, "campaign": True, "blocked": True,
                     "msg": camp.get("message")}
         if camp.get("already"):
             return {"ok": True, "campaign": True, "already": True,
