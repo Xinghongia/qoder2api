@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.2-2496ED?style=flat-square" alt="Version 1.2.2">
+  <img src="https://img.shields.io/badge/Release-v1.2.3-2496ED?style=flat-square" alt="Version 1.2.3">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -235,7 +235,7 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 
 | 项目 | 国际版 | 国内版 |
 |---|---|---|
-| 每日 100 Credits | 每账号每轮限领一次（**实际执行按"人"去重，见下**）；每日 10:00（UTC+8）刷新，错过不补；奖励 30 天有效；仅桌面端可领；新老个人用户均可（团队/企业不适用） | 规则同款（北京时间 10:00 刷新；体验版/专业版/高级版/旗舰版/会员卡均可） |
+| 每日 100 Credits | **每轮 10:00（UTC+8）滚动**（本轮 10:00 ~ 次日 09:59）；每账号每轮限领一次（**实际执行按"人"去重，见下**）；每日 10:00（UTC+8）刷新，错过不补；奖励 30 天有效；仅桌面端可领；新老个人用户均可（团队/企业不适用） | 规则同款（北京时间 10:00 刷新；体验版/专业版/高级版/旗舰版/会员卡均可） |
 | 新人权益 | **14 天 Pro 试用 + 300 Credits**：首次登录桌面客户端时发放（要求最新版）；**虚拟机不参与**；**每个用户限一次，额外注册的试用账号会被冻结** | 新注册用户活动（如「奶茶免单卡」）：桌面端完成指定成就（如 `sites_first_use`）后领取，任务中心会显示所需成就 |
 | 月度基础额度 | Free 档 **0 Credits**（超额后自动切基础模型） | 体验版/试用按套餐发放（实测 Pro Trial 300/月） |
 | 风控 | 客户端原生桥（`runtime-info.exe`）回传机器身份 + **VM 检测**；活动列表按真实机器身份定向下发，伪造/缺失会被静默过滤 | 同款原生桥与 VM 检测 |
@@ -384,6 +384,14 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.3
+
+**修复：上午点签到显示"已签到过"、明明今天还没领（轮次窗口与文案）**
+- 每日领取的轮次不是自然日：官方按 **10:00（UTC+8）滚动**（本轮 10:00 ~ 次日 09:59）。凌晨~上午 10 点前点签到，看到的是**昨天那一轮**的已领取状态，旧文案却写"今日已领取、明日再来"，让人以为今天领过了/功能坏了；
+- 现在所有相关文案改为**轮次窗口表述**：任务行/签到结果写「本轮已领取 +100 Credits（act-…）；**本轮截止 10-02 09:59**（每日 10:00 开启新一轮）」，可领取状态也附本轮截止时间；
+- 另修复「已领取」判定：0 积分的浏览类活动（VIEW_DETAILS）不再冒充"已签到"；
+- **"没有活动"更可操作**：服务端列表里完全没有每日领取活动时，若当前用的是**派生假身份**（服务器无客户端），提示直接指向「设置 → 机器身份」固定真身份；本机有风控桥时，列表被身份过滤会在换新身份后自动重试一次（此前只在 showCampaign=false 时重试）。
 
 ### v1.2.2
 

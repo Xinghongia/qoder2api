@@ -1567,9 +1567,9 @@ _A_CAMPAIGNS = {
     "intl": {"ok": True, "available": True, "show_campaign": True,
              "claimable": False, "campaign_url": "https://openapi.qoder.sh/growth-page/activity-iframe",
              "campaigns": [{"campaign_id": "c-intl", "campaign_key": "act-intl",
-                            "action_type": "VIEW_DETAILS", "claim_status": "CLAIMED",
+                            "action_type": "CLAIM_BENEFIT", "claim_status": "CLAIMED",
                             "start_at": 0, "end_at": 0,
-                            "benefit": {"kind": "", "amount": 0},
+                            "benefit": {"kind": "CREDITS", "amount": 100},
                             "required_achievement_key": "",
                             "achievement_completed": False, "unavailable_reason": "",
                             "placements": []}]},
@@ -1608,8 +1608,8 @@ check("task center lists BOTH realms",
       _view_all["accounts"])
 _intl_row = [t for t in _view_intl["tasks"] if t["task_code"] == "daily_checkin"][0]
 _cn_row = [t for t in _view_cn["tasks"] if t["task_code"] == "daily_checkin"][0]
-check("intl: claimed campaign renders as 今日已领取 (not an empty row)",
-      _intl_row["status"] == "claimed" and "今日已领取" in _intl_row["description"],
+check("intl: claimed daily campaign renders as 本轮已领取 (not an empty row)",
+      _intl_row["status"] == "claimed" and "本轮已领取" in _intl_row["description"],
       _intl_row)
 check("cn: CLAIMABLE campaign renders as 待领奖 + reward amount",
       _cn_row["status"] == "completed" and _cn_row["reward_credit"] == 100
@@ -2907,6 +2907,169 @@ finally:
         os.environ["QD_NATIVE_IDENTITY"] = _orig_native_env29
     import shutil as _sh29
     _sh29.rmtree(_TD29, ignore_errors=True)
+
+print()
+print("[30] round window (10:00 rollover) wording + identity-filtered retry")
+
+# 轮次说明：10:00 滚动（10:00 ~ 次日 09:59），上午点到的"已领取"是上一轮
+_future_end = int(time.time()) + 3600
+_note_future = A._round_note([{"end_at": _future_end}])
+check("round note shows the round deadline + 10:00 rollover",
+      "本轮截止" in _note_future and "10:00" in _note_future, _note_future)
+check("round note without windows still explains the 10:00 rollover",
+      "每日 10:00" in A._round_note([]), A._round_note([]))
+
+# campaign_checkin: 已领取消息带轮次说明（不再写"今日已领取/明日再来"）
+def fake_claimed_with_window(url, **kw):
+    if "daily-check-in/status" in url:
+        raise _ue2.HTTPError(url, 404, "nf", {}, _io2.BytesIO(b""))
+    if url.endswith("/campaigns"):
+        return {"uid": "rw-1", "showCampaign": True, "claimable": False,
+                "campaignUrl": "https://qoder.com/growth-page/activity-iframe",
+                "campaigns": [{"campaignId": "c-w", "campaignKey": "act-w",
+                               "actionType": "CLAIM_BENEFIT",
+                               "claimStatus": "CLAIMED",
+                               "startAt": 0, "endAt": _future_end,
+                               "benefit": {"kind": "CREDITS", "amount": 100},
+                               "placements": []}]}
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_orig_hj30 = _A.http_json
+_A.http_json = fake_claimed_with_window
+_acc_rw = _A.Account({"uid": "rw-1", "realm": "cn", "accessToken": "dt-x"})
+_res_rw = _acc_rw.checkin()
+_A.http_json = _orig_hj30
+check("claimed check-in message uses round wording (no '今日/明日')",
+      _res_rw.get("ok") and "本轮奖励已领取" in (_res_rw.get("msg") or "")
+      and "本轮截止" in (_res_rw.get("msg") or "")
+      and "明日再来" not in (_res_rw.get("msg") or ""), _res_rw)
+
+
+# 只有 VIEW_DETAILS 已领取（0 积分浏览活动）时，不再冒充"已领取"
+def fake_view_claimed(url, **kw):
+    if "daily-check-in/status" in url:
+        raise _ue2.HTTPError(url, 404, "nf", {}, _io2.BytesIO(b""))
+    if url.endswith("/campaigns"):
+        return {"uid": "vw-1", "showCampaign": True, "claimable": False,
+                "campaignUrl": "", "campaigns": [
+                    {"campaignId": "c-v", "campaignKey": "act-view",
+                     "actionType": "VIEW_DETAILS", "claimStatus": "CLAIMED",
+                     "startAt": 0, "endAt": 0,
+                     "benefit": {"kind": "", "amount": 0}, "placements": []}]}
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_view_claimed
+_acc_vw = _A.Account({"uid": "vw-1", "realm": "intl", "accessToken": "dt-x"})
+_res_vw = _acc_vw.checkin()
+_A.http_json = _orig_hj30
+check("view-only claimed item no longer reported as a check-in",
+      "领取" not in (_res_vw.get("msg") or "") or "未给该账号" in (_res_vw.get("msg") or ""),
+      _res_vw)
+
+# 派生身份下的"没有活动"给出可操作提示（固定真身份）
+_acc_dv = _A.Account({"uid": "dv-1", "realm": "cn", "accessToken": "dt-x"})
+_acc_dv.machine_identity_source = "derived"
+
+
+def fake_empty_camp30(url, **kw):
+    if url.endswith("/campaigns"):
+        return {"uid": "dv-1", "showCampaign": True, "claimable": False,
+                "campaignUrl": "", "campaigns": []}
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_A.http_json = fake_empty_camp30
+_cc_dv = _acc_dv.campaign_checkin(gap=0)
+_A.http_json = _orig_hj30
+check("no-activity message under a derived identity points at 机器身份",
+      "机器身份" in (_cc_dv.get("message") or "")
+      and "派生假身份" in (_cc_dv.get("message") or ""), _cc_dv.get("message"))
+
+# campaigns(): 列表被身份过滤（无任何每日项）时换新身份重试一次
+_orig_native30 = A.native_machine_identity
+_retry30 = {"n": 0}
+_calls30 = {"n": 0}
+
+
+def _stub_native30(realm, account_id, force=False):
+    _retry30["n"] += 1
+    return {"machineToken": "t", "machineType": "m", "machineCode": "c",
+            "source": "runtime-info"}
+
+
+def _filtered_payload():
+    return {"showCampaign": True, "claimable": False, "campaignUrl": "",
+            "campaigns": [{"campaignId": "c-v", "campaignKey": "act-view",
+                           "actionType": "VIEW_DETAILS",
+                           "claimStatus": "CLAIMABLE",
+                           "startAt": 0, "endAt": 0,
+                           "benefit": {"kind": "", "amount": 0},
+                           "placements": []}]}
+
+
+def _daily_payload():
+    return {"showCampaign": True, "claimable": True, "campaignUrl": "",
+            "campaigns": [{"campaignId": "c-d", "campaignKey": "act-daily",
+                           "actionType": "CLAIM_BENEFIT",
+                           "claimStatus": "CLAIMABLE",
+                           "startAt": 0, "endAt": 0,
+                           "benefit": {"kind": "CREDITS", "amount": 100},
+                           "placements": []}]}
+
+
+A.native_machine_identity = _stub_native30
+try:
+    _acc_rt = _A.Account({"uid": "rt-1", "realm": "cn", "accessToken": "dt-x"})
+    _acc_rt.machine_identity_source = "native"
+
+    def _get_filtered_then_daily():
+        _calls30["n"] += 1
+        payload = _filtered_payload() if _calls30["n"] == 1 else _daily_payload()
+        return payload, 200, ""
+
+    _acc_rt._campaigns_get = _get_filtered_then_daily
+    _st_rt = _acc_rt.campaigns(force=True)
+    check("identity-filtered list (no daily item) triggers one fresh-identity retry",
+          _retry30["n"] == 1 and _calls30["n"] == 2
+          and any(c["claim_status"] == "CLAIMABLE"
+                  for c in _st_rt.get("campaigns") or []), (_retry30, _calls30))
+
+    _retry30["n"] = 0
+    _calls30["n"] = 0
+    _acc_dr = _A.Account({"uid": "dr-1", "realm": "cn", "accessToken": "dt-x"})
+    _acc_dr.machine_identity_source = "derived"
+    _acc_dr._campaigns_get = lambda: (_calls30.__setitem__("n", _calls30["n"] + 1)
+                                      or (_filtered_payload(), 200, ""))
+    _st_dr = _acc_dr.campaigns(force=True)
+    check("derived identity does NOT retry (no bridge to refresh anyway)",
+          _retry30["n"] == 0 and _calls30["n"] == 1, (_retry30, _calls30))
+finally:
+    A.native_machine_identity = _orig_native30
+
+# 任务行：已领取带轮次窗口；纯 VIEW 已领取不再冒充签到
+_row_rw = T._campaign_task_row(
+    _A.Account({"uid": "row-rw", "realm": "cn"}),
+    {"ok": True, "available": True, "show_campaign": True, "claimable": False,
+     "campaign_url": "", "identity": "native",
+     "campaigns": [{"campaign_id": "c-w", "campaign_key": "act-w",
+                    "action_type": "CLAIM_BENEFIT", "claim_status": "CLAIMED",
+                    "start_at": 0, "end_at": _future_end,
+                    "benefit": {"kind": "CREDITS", "amount": 100},
+                    "required_achievement_key": "", "achievement_completed": False,
+                    "unavailable_reason": "", "placements": []}]}, {})
+check("task row: claimed shows the round deadline instead of 明日再来",
+      "本轮已领取" in _row_rw["description"]
+      and "本轮截止" in _row_rw["description"]
+      and "明日再来" not in _row_rw["description"], _row_rw["description"])
+
+_row_dv = T._campaign_task_row(
+    _A.Account({"uid": "row-dv", "realm": "cn"}),
+    {"ok": True, "available": True, "show_campaign": True, "claimable": False,
+     "campaign_url": "", "identity": "derived", "campaigns": []}, {})
+check("task row: derived identity hint appended to the no-activity row",
+      "机器身份" in _row_dv["description"], _row_dv["description"])
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

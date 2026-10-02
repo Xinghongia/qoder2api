@@ -284,18 +284,32 @@ def _campaign_task_row(account, camp, summary):
     claimable = [c for c in items
                  if c["claim_status"] == "CLAIMABLE"
                  and c["action_type"] in ("", "CLAIM_BENEFIT")]
-    claimed = [c for c in items if c["claim_status"] == "CLAIMED"]
+    # 只把"每日领取 Credits"类的已领取计入任务行；VIEW_DETAILS 之类的
+    # 0 积分浏览活动不再混进「已领取」文案
+    claimed = [c for c in items if c["claim_status"] == "CLAIMED"
+               and c["action_type"] in ("", "CLAIM_BENEFIT")]
     # 成就门控活动（如 CN 新人「奶茶免单卡」需先完成 sites_first_use）：
     # 服务端状态 ACHIEVEMENT_NOT_COMPLETED —— 显示成就要求，不能直接领取
     gated = [c for c in items if c["claim_status"] == "ACHIEVEMENT_NOT_COMPLETED"]
+
+    def _round_suffix(rows):
+        # 轮次与自然日不同：每日 10:00（UTC+8）滚动（本轮 10:00 ~ 次日 09:59）。
+        # 上午 10 点前显示的"已领取"是**昨天那一轮**，必须如实写出来。
+        ends = [r.get("end_at") or 0 for r in rows]
+        end = max(ends) if ends else 0
+        if end and end > time.time():
+            return "本轮截止 %s（每日 10:00 开启新一轮）" % time.strftime(
+                "%m-%d %H:%M", time.localtime(end))
+        return "每日 10:00 开启新一轮"
+
     if claimable:
         amount = sum(c["benefit_amount"] or 0 for c in claimable)
         keys = ", ".join(c["key"] for c in claimable)
         return {
             "task_code": "daily_checkin",
             "name": "每日签到（每日领取 Credits）",
-            "description": "可领取 %s Credits（%s）—— 点「一键签到」或该账号行的「签到」直接领取"
-                           % (amount or "-", keys),
+            "description": "可领取 %s Credits（%s）—— 点「一键签到」或该账号行的「签到」直接领取；%s"
+                           % (amount or "-", keys, _round_suffix(claimable)),
             "jump_url": jump,
             "status": "completed",
             "current": 1,
@@ -309,8 +323,9 @@ def _campaign_task_row(account, camp, summary):
         return {
             "task_code": "daily_checkin",
             "name": "每日签到（每日领取 Credits）",
-            "description": "今日已领取%s（%s），明日再来"
-                           % ((" +%s Credits" % amount) if amount else "", keys),
+            "description": "本轮已领取%s（%s）；%s"
+                           % ((" +%s Credits" % amount) if amount else "", keys,
+                              _round_suffix(claimed)),
             "jump_url": jump,
             "status": "claimed",
             "current": 1,
@@ -338,6 +353,9 @@ def _campaign_task_row(account, camp, summary):
             "活动定向内、虚拟机环境、试用资格已用尽/冻结；详见 README「活动与新人权益规则」）")
     if camp.get("show_campaign"):
         desc = "活动进行中，当前账号暂无可领取项"
+    if camp.get("identity") == "derived":
+        # 派生假身份会被服务端静默过滤设备定向活动——给出可操作的出路
+        desc += "；当前为派生假身份，设备定向活动可能被过滤（可在「设置 → 机器身份」固定真身份）"
     return {
         "task_code": "daily_checkin",
         "name": "每日签到（每日领取 Credits）",

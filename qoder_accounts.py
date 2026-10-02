@@ -604,6 +604,34 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
 # ---------------------------------------------------------------------------
 # Account
 # ---------------------------------------------------------------------------
+def _round_note(items):
+    """活动轮次说明：本轮截止时间 + 每日 10:00 开启新一轮。
+
+    轮次不是自然日：官方每日领取按 10:00（UTC+8）滚动（本轮窗口
+    10:00 ~ 次日 09:59）。凌晨~上午 10 点前点签到看到的"已领取"是
+    **上一轮**的状态，此前文案写"今日已领取、明日再来"会把用户绕晕。
+    """
+    ends = []
+    for c in items or []:
+        try:
+            e = int(c.get("end_at") or 0)
+        except (TypeError, ValueError):
+            e = 0
+        if e:
+            ends.append(e)
+    if ends:
+        nxt = max(ends)
+        if nxt > time.time():
+            return "本轮截止 %s（每日 10:00 开启新一轮）" % time.strftime(
+                "%m-%d %H:%M", time.localtime(nxt))
+    return "每日 10:00 开启新一轮"
+
+
+def _is_daily_item(c):
+    """是否为"每日领取 Credits"类活动（CLAIM_BENEFIT；空 action 视为可领）。"""
+    return str(c.get("action_type") or "") in ("", "CLAIM_BENEFIT")
+
+
 class Account(object):
     def __init__(self, data, path=None):
         data = data or {}
@@ -1131,11 +1159,15 @@ class Account(object):
                 and now - self._campaigns_cache[0] < CAMPAIGNS_TTL:
             return self._campaigns_cache[1]
         q, code, err = self._campaigns_get()
-        if isinstance(q, dict) and not q.get("showCampaign") \
+        # 身份被判定为非官方客户端时列表会被静默过滤：既可能整体不显示
+        # （showCampaign=false），也可能只把"每日领取"这类设备定向活动滤掉
+        # （列表里没有任何 CLAIM_BENEFIT 项）。两种形态都换一次新身份重试。
+        if isinstance(q, dict) and self._campaigns_needs_identity_retry(q) \
                 and getattr(self, "machine_identity_source", "") == "native":
             native_machine_identity(self.realm, self.uid, force=True)
             q2, code2, err2 = self._campaigns_get()
-            if isinstance(q2, dict) and q2.get("showCampaign"):
+            if isinstance(q2, dict) \
+                    and (q2.get("showCampaign") or self._raw_has_daily(q2)):
                 q, code, err = q2, code2, err2
         if not isinstance(q, dict):
             return {"ok": False, "available": code not in (404, 405, 410),
@@ -1187,6 +1219,23 @@ class Account(object):
                              timeout=20, retries=1)
         except Exception as exc:
             return {"error": str(exc)}
+
+    def _campaigns_needs_identity_retry(self, q):
+        """列表疑似被身份过滤：整体隐藏，或没有任何每日领取项。"""
+        if not q.get("showCampaign"):
+            return True
+        return not self._raw_has_daily(q)
+
+    @staticmethod
+    def _raw_has_daily(q):
+        raw = q.get("campaigns") if isinstance(q, dict) else None
+        for c in (raw if isinstance(raw, list) else []):
+            if not isinstance(c, dict):
+                continue
+            action = str(c.get("actionType") or c.get("action_type") or "")
+            if action in ("", "CLAIM_BENEFIT"):
+                return True
+        return False
 
     def claim_campaign(self, campaign_id):
         """POST …/campaigns/{id}/claim -> 领取该活动奖励（官方幂等语义）。
@@ -1285,20 +1334,30 @@ class Account(object):
             else:
                 errors.append("%s: %s" % (c["campaign_key"] or c["campaign_id"],
                                           res.get("error")))
+        daily_already = [c for c in already if _is_daily_item(c)]
         if claimed:
-            msg = "活动领取成功 +%d Credits（%s）" % (
+            msg = "活动领取成功 +%d Credits（%s）；%s" % (
                 earned, ", ".join(c["campaign_key"] or c["campaign_id"]
-                                  for c in claimed))
+                                  for c in claimed), _round_note(claimed))
         elif blocked:
             msg = ("同人已领取：同一设备/身份下的其他账号本轮已领过（服务端按人去重，"
                    "failureCode=%s）" % blocked[0].get("failure_code"))
-        elif already:
-            msg = "今日活动奖励已领取（%s）" % ", ".join(
-                c["campaign_key"] or c["campaign_id"] for c in already)
+        elif daily_already:
+            msg = "本轮奖励已领取（%s）；%s" % (
+                ", ".join(c["campaign_key"] or c["campaign_id"]
+                          for c in daily_already),
+                _round_note(daily_already))
         elif errors:
             msg = "活动领取失败：%s" % "; ".join(errors)[:200]
         else:
-            msg = "当前账号暂无可领取的官方活动"
+            ident = getattr(self, "machine_identity_source", "derived")
+            if ident == "derived":
+                msg = ("服务端未给该账号下发每日领取活动（当前用的是**派生假身份**，"
+                       "设备定向活动可能被静默过滤——在看板「设置 → 机器身份」"
+                       "固定真身份后重试）")
+            else:
+                msg = ("服务端未给该账号下发每日领取活动（账号未在活动定向内；"
+                       "常见原因见 README「活动与新人权益规则」）")
         # 领取动作会改变活动状态：让下一次列表查询重新拉取（不吃 20s 缓存）
         self._campaigns_cache = None
         return {"ok": not errors, "claimed": claimed, "already": already,
