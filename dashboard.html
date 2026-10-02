@@ -562,16 +562,18 @@ a:hover{text-decoration:underline}
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
         官方风控按「机器身份」下发设备定向活动（每日 100 Credits 等）。装有官方客户端的机器（Windows）能自动取到<b>真身份</b>；
         Linux/服务器没有客户端，只能回退成派生的假身份，定向活动可能被静默过滤。<b>身份与区域无关</b>（同一台机器的国内/国际账号共用一份）：
-        在装有客户端的机器点「导出本机身份」，复制 JSON 到这里保存，服务器即与本机完全对齐。
+        在装有客户端的机器点「导出本机身份」<b>下载身份文件</b>，把文件传到服务器，用「选择文件导入」读取后点「保存固定身份」即可完全对齐。
       </div>
       <div style="margin-bottom:10px;font-size:13px">当前：<span id="identityState" style="font-weight:600">-</span>
         <span id="identityMeta" style="font-size:12px;color:var(--dim)"></span></div>
       <textarea id="setIdentityJson" rows="3" placeholder='粘贴身份 JSON：{"machineToken":"...","machineType":"...","machineCode":"..."}'
                 style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:12px ui-monospace,monospace;resize:vertical"></textarea>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <button class="sec" onclick="exportIdentity(this)">导出本机身份</button>
+        <button class="sec" onclick="exportIdentity(this)">导出本机身份（下载文件）</button>
+        <button class="sec" onclick="document.getElementById('identityFile').click()">选择文件导入</button>
         <button onclick="saveIdentity(this)">保存固定身份</button>
         <button class="sec" onclick="clearIdentity(this)">清除固定</button>
+        <input type="file" id="identityFile" accept=".json,application/json" style="display:none" onchange="importIdentityFile(this)">
       </div>
     </section>
 
@@ -2763,15 +2765,46 @@ async function exportIdentity(btn){
       toast('导出失败：' + (r.reason || '未知原因'), 'warn');
       return;
     }
+    const text = JSON.stringify(r.identity || {}, null, 2);
     const el = document.getElementById('setIdentityJson');
-    if(el) el.value = JSON.stringify(r.identity || {}, null, 2);
-    await writeClipboard(el ? el.value : '').catch(() => {});
-    toast('已导出并复制到剪贴板：到服务器看板粘贴保存即可', 'ok');
+    if(el) el.value = text;
+    // 直接下载成文件：剪贴板 API 在部分环境（非安全上下文/浏览器限制）不可用，
+    // 之前"点了没反应"。文件用「选择文件导入」在服务器侧一键读取。
+    const name = 'qoder-machine-identity.json';
+    try{
+      const blob = new Blob([text], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function(){ a.remove(); URL.revokeObjectURL(url); }, 500);
+      toast('已下载 ' + name + '：把它传到服务器，用「选择文件导入」读取后点保存', 'ok');
+    }catch(e){
+      toast('下载失败，请手动复制文本框里的内容：' + e.message, 'warn');
+    }
+    writeClipboard(text).catch(function(){});   // 剪贴板尽力而为，失败不影响
   }catch(e){
     toast('导出失败: ' + e.message, 'bad');
   }finally{
-    if(btn){ btn.disabled = false; btn.textContent = '导出本机身份'; }
+    if(btn){ btn.disabled = false; btn.textContent = '导出本机身份（下载文件）'; }
   }
+}
+
+/* 选择导出的身份文件（服务器侧）：读取 JSON 填进文本框，再点「保存固定身份」 */
+function importIdentityFile(input){
+  const file = (input && input.files && input.files[0]) || null;
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = function(){
+    const el = document.getElementById('setIdentityJson');
+    if(el) el.value = String(reader.result || '');
+    toast('已读取 ' + file.name + '，点「保存固定身份」生效', 'ok');
+  };
+  reader.onerror = function(){ toast('读取文件失败', 'bad'); };
+  reader.readAsText(file);
+  input.value = '';
 }
 
 async function saveIdentity(btn){

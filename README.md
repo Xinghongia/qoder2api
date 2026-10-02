@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.1-2496ED?style=flat-square" alt="Version 1.2.1">
+  <img src="https://img.shields.io/badge/Release-v1.2.2-2496ED?style=flat-square" alt="Version 1.2.2">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -384,6 +384,12 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.2
+
+**修复：机器身份「导出」改为直接下载文件**
+- 导出按钮现在**直接下载 `qoder-machine-identity.json`**（此前只写剪贴板——部分环境剪贴板 API 不可用，点了“没反应”）；文本框仍会同时填入内容兜底；
+- 接收侧新增「**选择文件导入**」：选中导出的 JSON 文件自动读取，再点「保存固定身份」生效（v1.2.1 的固定逻辑不变）。
 
 ### v1.2.1
 
