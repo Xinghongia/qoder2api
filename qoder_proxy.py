@@ -50,10 +50,11 @@ import qoder_settings
 import qoder_sign
 from qoder_sign import qoder_encode, SESSIONS
 from qoder_accounts import (get_realm_config, gateway_candidates, CLIENT_UA,
-                            local_vm_status)
+                            local_vm_status, export_bridge_identity,
+                            runtime_info_exe)
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 if CURRENT_REALM not in ("intl", "cn"):
@@ -1144,6 +1145,23 @@ def compute_usage_analytics():
     }
 
 
+def machine_identity_view():
+    """看板「机器身份」状态：是否已固定 / 生效来源 / 桥是否可用。"""
+    pin = qoder_settings.machine_identity(ACCOUNTS_DIR)
+    bridge = bool(runtime_info_exe(CURRENT_REALM))
+    view = {
+        "pinned": bool(pin),
+        "pinned_at": (pin or {}).get("pinned_at") or "",
+        "bridge_available": bridge,
+        "effective_source": ("pinned" if pin
+                             else ("runtime-info" if bridge else "derived")),
+    }
+    if pin:
+        view["preview"] = ("%s…%s" % (pin["machineToken"][:8],
+                                      pin["machineToken"][-6:]))
+    return view
+
+
 def runtime_settings_view():
     """Current panel-visible settings (never returns the password or the key)."""
     key = API_KEY or ""
@@ -1174,6 +1192,7 @@ def runtime_settings_view():
         "api_keys": keys,
         "model_overrides": qoder_settings.model_overrides(ACCOUNTS_DIR),
         "proxy": qoder_net.describe(),
+        "machine_identity": machine_identity_view(),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": qoder_settings.settings_path(ACCOUNTS_DIR),
@@ -4593,6 +4612,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/update"):
             return True
+        if path.startswith("/identity"):
+            return True
         return False
 
     def do_OPTIONS(self):
@@ -4673,6 +4694,16 @@ class Handler(BaseHTTPRequestHandler):
                     force=bool(_q.get("force", [None])[0])))
             except Exception as exc:
                 return self._error(500, "vm status failed: %s" % exc)
+        if path == "/identity/export":
+            # 导出本机机器身份（给没有官方客户端的机器固定用；面板鉴权）。
+            if not self._panel_ok():
+                return self._error(401, "panel password required",
+                                   "invalid_request_error")
+            ident, reason = export_bridge_identity(CURRENT_REALM)
+            return self._json(200, {
+                "ok": bool(ident), "identity": ident or None,
+                "reason": reason,
+                "note": "在目标机器看板「设置 → 机器身份」粘贴保存即可固定"})
         if path == "/update/check":
             # 项目新版本检测（看板「运行信息 · 新版本检测」；缓存 6h，force=1 强刷）
             _q = parse_qs(urlparse(self.path).query)
@@ -5009,6 +5040,21 @@ class Handler(BaseHTTPRequestHandler):
             qoder_settings.set_proxy_config(ACCOUNTS_DIR, mode, url)
             reply["proxy_saved"] = qoder_net.describe()["effective"]
             log("proxy      : %s" % reply["proxy_saved"])
+        if "machine_identity" in payload:
+            # 固定/清除机器身份（看板「设置 → 机器身份」）：
+            # 值为 {machineToken, machineType, machineCode[, vmInfo]} 或 null。
+            value = payload.get("machine_identity")
+            if value is not None and not isinstance(value, dict):
+                return self._error(400, "machine_identity must be an object or null",
+                                   "invalid_request_error")
+            try:
+                saved_ident = qoder_settings.set_machine_identity(
+                    ACCOUNTS_DIR, value)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["machine_identity"] = machine_identity_view()
+            log("machine identity %s" % (
+                "pinned" if saved_ident else "cleared"))
         if payload.get("restart_scheduler"):
             if SCHEDULER:
                 SCHEDULER.stop()
@@ -5203,6 +5249,11 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 # 能力运行时探测（不再"仅国内版"）：接口不存在时返回明确原因
                 res = account.checkin()
+                # 签到后顺手刷新额度快照：账号行的积分列与"更新于"随点击更新
+                try:
+                    account.fetch_credits()
+                except Exception:
+                    pass
                 results.append({"uid": account.uid,
                                 "nickname": account.nickname, **res})
             qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
@@ -5880,6 +5931,9 @@ def main():
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
+    # 让 qoder_accounts 的机器身份固定设置读到同一个 accounts 目录
+    # （机器身份存 accounts/settings.json，查表走 ACCOUNTS_DIR 环境变量）
+    os.environ["ACCOUNTS_DIR"] = ACCOUNTS_DIR
     # LAN 模式绝不能带默认密钥：网关花的是账号自己的上游额度，
     # 可猜的默认值等于让全网段的人白嫖。首次生成一次并持久化。
     if args.lan and not API_KEY:

@@ -113,12 +113,16 @@ def identity_report(realm, account_id):
     ident = A.native_machine_identity(realm, account_id)
     if not ident:
         return "机器身份=派生回退（runtime-info.exe 调用失败）"
-    src = ident.get("bridge_realm") or ""
+    src = ident.get("source") or ""
+    if src == "pinned":
+        return ("机器身份=已固定（从装有客户端的机器导出后固定；"
+                "不再依赖本机客户端）")
+    bridge = ident.get("bridge_realm") or ""
     note = ""
-    if src in ("cn", "intl") and src != realm:
+    if bridge in ("cn", "intl") and bridge != realm:
         note = "（本区域未装客户端，借用%s版风控桥；机器身份与区域无关）" % (
-            "国内" if src == "cn" else "国际")
-    elif src == "explicit":
+            "国内" if bridge == "cn" else "国际")
+    elif bridge == "explicit":
         note = "（QD_RUNTIME_INFO 指定）"
     return "机器身份=官方原生桥 runtime-info（真实身份，来源可信）" + note
 

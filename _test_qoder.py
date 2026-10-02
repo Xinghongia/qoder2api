@@ -2737,5 +2737,177 @@ else:
     os.environ["QD_NATIVE_IDENTITY"] = _orig_env28
 
 print()
+print("[29] pinned machine identity + stale-credits refresh (server parity)")
+
+import tempfile as _tf29
+_TD29 = _tf29.mkdtemp(prefix="qdident29_")
+_orig_accdir29 = os.environ.get("ACCOUNTS_DIR")
+_orig_env_ident29 = os.environ.pop("QD_MACHINE_IDENTITY", None)
+_orig_native_env29 = os.environ.get("QD_NATIVE_IDENTITY")
+try:
+    os.environ["ACCOUNTS_DIR"] = _TD29
+    check("no pin by default", A._pinned_machine_identity() is None)
+
+    # 固定一份身份（模拟从装有客户端的机器导出后粘贴）
+    _pin29 = {"machineToken": "tok-abc-1234567890", "machineType": "mtype-1",
+              "machineCode": "mcode-1", "vmInfo": {"isVm": True, "percentage": 77}}
+    A.qoder_settings.set_machine_identity(_TD29, _pin29)
+    _ident29 = A.native_machine_identity("intl", "some-uid")
+    check("pinned identity wins the resolution order (realm-free, account-free)",
+          _ident29.get("source") == "pinned"
+          and _ident29.get("machineToken") == "tok-abc-1234567890"
+          and _ident29.get("bridge_realm") == "pinned"
+          and _ident29.get("vm") is True, _ident29)
+    os.environ["QD_NATIVE_IDENTITY"] = "0"
+    check("pinned identity works even with the native bridge disabled",
+          A.native_machine_identity("cn", "u").get("source") == "pinned")
+
+    # 环境变量优先于设置文件
+    os.environ["QD_MACHINE_IDENTITY"] = json.dumps(
+        {"machineToken": "env-token-xyz", "machineType": "env-type",
+         "machineCode": "env-code"})
+    _ident_env29 = A.native_machine_identity("cn", "u")
+    check("QD_MACHINE_IDENTITY env overrides the settings file",
+          _ident_env29.get("machineToken") == "env-token-xyz", _ident_env29)
+    os.environ["QD_MACHINE_IDENTITY"] = "{not json"
+    check("broken env JSON falls back to the settings file",
+          A._pinned_machine_identity().get("machineToken") == "tok-abc-1234567890")
+    os.environ.pop("QD_MACHINE_IDENTITY", None)
+
+    # 导出：已固定时直接回固定值；未固定且无桥时给出明确原因
+    _exp29, _reason29 = A.export_bridge_identity("intl")
+    check("export returns the pinned identity when one is set",
+          _exp29 and _exp29.get("source") == "pinned"
+          and _exp29.get("machineToken") == "tok-abc-1234567890", _exp29)
+    A.qoder_settings.set_machine_identity(_TD29, None)
+    _orig_exe29 = A.runtime_info_exe
+    A.runtime_info_exe = lambda realm: ""
+    try:
+        _exp29b, _reason29b = A.export_bridge_identity("intl")
+        check("export without a bridge explains why (no crash)",
+              _exp29b is None and "runtime-info" in _reason29b, _reason29b)
+    finally:
+        A.runtime_info_exe = _orig_exe29
+    check("clear removes the pin",
+          A.qoder_settings.machine_identity(_TD29) is None
+          and A._pinned_machine_identity() is None)
+
+    # 看板保存接口：dict 保存 / null 清除 / 非法输入 400
+    _orig_dir29 = P.ACCOUNTS_DIR
+    P.ACCOUNTS_DIR = _TD29
+    try:
+        _h29 = P.Handler.__new__(P.Handler)
+        _cap29 = {}
+        _h29._payload_or_error = lambda: {"machine_identity": {
+            "machineToken": "via-panel-token", "machineType": "t",
+            "machineCode": "c"}}
+        _h29._json = lambda code, obj: _cap29.update({"code": code, "obj": obj})
+        _h29._error = lambda code, msg, *a: _cap29.update({"err": code, "msg": msg})
+        _h29._handle_settings_save()
+        check("/settings/save pins the identity via the panel",
+              _cap29.get("code") == 200
+              and _cap29["obj"].get("machine_identity", {}).get("pinned") is True,
+              _cap29)
+        _h29._payload_or_error = lambda: {"machine_identity": None}
+        _h29._handle_settings_save()
+        check("/settings/save null clears the pin",
+              _cap29["obj"].get("machine_identity", {}).get("pinned") is False)
+        _h29._payload_or_error = lambda: {"machine_identity": {"machineToken": "x"}}
+        _h29._handle_settings_save()
+        check("incomplete identity is rejected with 400",
+              _cap29.get("err") == 400, _cap29)
+        _h29._payload_or_error = lambda: {"machine_identity": "nope"}
+        _h29._handle_settings_save()
+        check("non-object identity is rejected with 400",
+              _cap29.get("err") == 400, _cap29)
+    finally:
+        P.ACCOUNTS_DIR = _orig_dir29
+    check("/identity/export is a panel route",
+          P.Handler._is_panel_route("/identity/export"))
+
+    # ---- 过期额度快照自动刷新（/tasks 批量视图） ----
+    T.invalidate_panel_cache()
+    _now29 = time.time()
+    _pa29 = A.Account({"uid": "fresh-29", "realm": "cn", "accessToken": "dt-x"})
+    _pb29 = A.Account({"uid": "stale-29", "realm": "cn", "accessToken": "dt-x"})
+    _pa29.credits = {"remain": 100, "updated_at": _now29}
+    _pb29.credits = {"remain": 50, "updated_at": _now29 - 9999}   # 过期快照
+    _cnt29 = {"a": 0, "b": 0}
+    _empty_camp29 = {"ok": True, "available": True, "show_campaign": False,
+                     "claimable": False, "campaign_url": "", "campaigns": [],
+                     "identity": "derived"}
+
+    def _fake_camp29(*a, **kw):
+        return _empty_camp29
+
+    def _fake_status29(*a, **kw):
+        return (True, {"streak_days": 0, "total_claim_days": 0,
+                       "today_checked_in": True, "active": True,
+                       "reward_credits": 100})
+
+    def _fake_pro29(*a, **kw):
+        return (True, False)
+
+    def _fetch_a29(*a, **kw):
+        _cnt29["a"] += 1
+        return {"ok": True}
+    def _fetch_b29(*a, **kw):
+        _cnt29["b"] += 1
+        _pb29.credits = {"remain": 70, "updated_at": time.time()}   # 拉到新值
+        return {"ok": True}
+
+    _pa29.campaigns = _fake_camp29
+    _pb29.campaigns = _fake_camp29
+    for _acc29 in (_pa29, _pb29):
+        _acc29.checkin_status = _fake_status29
+        _acc29.pro_eligibility = _fake_pro29
+        _acc29.fetch_plan = lambda *a, **kw: "Free"
+    _pa29.fetch_credits = _fetch_a29
+    _pb29.fetch_credits = _fetch_b29
+
+    class _Pool29(object):
+        def __init__(self):
+            self.accounts = [_pa29, _pb29]
+        def get(self, uid):
+            return next((x for x in self.accounts if x.uid == uid), None)
+
+    _view29 = T.fetch_tasks_view(_Pool29())
+    _sm29 = _view29.get("summary") or {}
+    check("stale snapshot refetched, fresh one kept (focus account fetched once)",
+          _cnt29 == {"a": 1, "b": 1}, _cnt29)
+    check("batch balance uses the REFRESHED value",
+          _sm29.get("energy") == 170, _sm29.get("energy"))
+    _bd29 = {b["uid"]: b["remain"] for b in (_sm29.get("energy_breakdown") or [])}
+    check("breakdown shows the refreshed number for the stale account",
+          _bd29.get("stale-29") == 70 and _bd29.get("fresh-29") == 100, _bd29)
+
+    # 新鲜快照不会被重复拉取（第二次调用走面板缓存/新鲜判断）
+    _cnt29["a"] = _cnt29["b"] = 0
+    T.invalidate_panel_cache()
+    _view29b = T.fetch_tasks_view(_Pool29())
+    check("now-fresh snapshots are not refetched again",
+          _cnt29 == {"a": 1, "b": 0}, _cnt29)
+    check("_credits_stale matches the TTL boundary",
+          T._credits_stale(_pa29) is False
+          and T._credits_stale(_pb29) is False)  # b 刚刷新过，a 一直新鲜
+    _pc29 = A.Account({"uid": "stale-29b", "realm": "cn", "accessToken": "dt-x"})
+    _pc29.credits = {"remain": 1, "updated_at": time.time() - (T.CREDITS_STALE_TTL + 5)}
+    check("_credits_stale flags a snapshot older than the TTL",
+          T._credits_stale(_pc29) is True)
+finally:
+    if _orig_accdir29 is None:
+        os.environ.pop("ACCOUNTS_DIR", None)
+    else:
+        os.environ["ACCOUNTS_DIR"] = _orig_accdir29
+    if _orig_env_ident29 is not None:
+        os.environ["QD_MACHINE_IDENTITY"] = _orig_env_ident29
+    if _orig_native_env29 is None:
+        os.environ.pop("QD_NATIVE_IDENTITY", None)
+    else:
+        os.environ["QD_NATIVE_IDENTITY"] = _orig_native_env29
+    import shutil as _sh29
+    _sh29.rmtree(_TD29, ignore_errors=True)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

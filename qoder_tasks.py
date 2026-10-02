@@ -31,6 +31,27 @@ PANEL_CACHE_TTL = 20
 _panel_cache = {}
 _panel_lock = threading.Lock()
 
+# 额度快照的新鲜度：超过这个秒数的快照在 /tasks 批量视图里重新拉取。
+# 此前只补"完全缺失"的快照，部署端会出现几个小时前的旧余额（本地领了
+# 积分、服务器页面还是旧数，刷新页面也不变）——这正是"两边数字不一样"的根因。
+CREDITS_STALE_TTL = 180
+
+
+def _refresh_credits_safe(account):
+    try:
+        account.fetch_credits()
+    except Exception:
+        pass
+
+
+def _credits_stale(account, now=None, ttl=CREDITS_STALE_TTL):
+    credits = getattr(account, "credits", None) or {}
+    try:
+        updated = float(credits.get("updated_at") or 0)
+    except (TypeError, ValueError):
+        updated = 0.0
+    return (now or time.time()) - updated > ttl
+
 
 def invalidate_panel_cache(uid=None):
     """清除面板短缓存；uid 为空时全部清除（写操作后调用）。"""
@@ -357,13 +378,15 @@ def fetch_tasks_view(pool, realm=None, uid=None):
     if batch_mode:
         # 「全部账号 (批量)」视图：余额卡片显示**各账号合计**（此前用的是
         # 首个账号的快照，账号一多就对不上；单账号视图保持原样）。
+        # 快照过期（> CREDITS_STALE_TTL）的账号并行重拉，避免部署端长期
+        # 显示旧余额；20 秒面板缓存已在上层挡住高频重复请求。
+        stale = [a for a in eligible if _credits_stale(a)]
+        if stale:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(4, len(stale))) as ex:
+                list(ex.map(_refresh_credits_safe, stale))
         breakdown, total = [], 0
         for a in eligible:
-            if not a.credits:
-                try:
-                    a.fetch_credits()
-                except Exception:
-                    pass
             remain = int((a.credits or {}).get("remain") or 0)
             total += remain
             breakdown.append({"uid": a.uid,

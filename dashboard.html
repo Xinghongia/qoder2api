@@ -558,6 +558,24 @@ a:hover{text-decoration:underline}
     </section>
 
     <section>
+      <h2>机器身份（服务器与本机对齐）</h2>
+      <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+        官方风控按「机器身份」下发设备定向活动（每日 100 Credits 等）。装有官方客户端的机器（Windows）能自动取到<b>真身份</b>；
+        Linux/服务器没有客户端，只能回退成派生的假身份，定向活动可能被静默过滤。<b>身份与区域无关</b>（同一台机器的国内/国际账号共用一份）：
+        在装有客户端的机器点「导出本机身份」，复制 JSON 到这里保存，服务器即与本机完全对齐。
+      </div>
+      <div style="margin-bottom:10px;font-size:13px">当前：<span id="identityState" style="font-weight:600">-</span>
+        <span id="identityMeta" style="font-size:12px;color:var(--dim)"></span></div>
+      <textarea id="setIdentityJson" rows="3" placeholder='粘贴身份 JSON：{"machineToken":"...","machineType":"...","machineCode":"..."}'
+                style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:12px ui-monospace,monospace;resize:vertical"></textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <button class="sec" onclick="exportIdentity(this)">导出本机身份</button>
+        <button onclick="saveIdentity(this)">保存固定身份</button>
+        <button class="sec" onclick="clearIdentity(this)">清除固定</button>
+      </div>
+    </section>
+
+    <section>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
         <div>
           <h2 style="margin:0">API Key 与出口绑定 <em id="setKeyState"></em></h2>
@@ -1776,12 +1794,20 @@ async function loadAccounts(){
     (byAcct.accounts || []).forEach(a => { USAGE_BY_ACCOUNT[a.account] = a; });
     renderAccounts();
     updateUI();
-    // Auto-fetch credits once if not present
-    if(window.ACCOUNTS.length && window.ACCOUNTS.some(a => !a.credits)){
+    // 积分快照缺失或过期（>180s）时自动重拉（带去重锁）：此前只在"完全缺失"
+    // 时拉一次，部署端会一直显示几小时前的旧余额——刷新页面也不变，
+    // 表现为"本地和服务器积分不一样"。
+    const stale = window.ACCOUNTS.length && window.ACCOUNTS.some(a => {
+      const at = a.credits && a.credits.updated_at;
+      return !at || (Date.now() / 1000 - Number(at)) > 180;
+    });
+    if(stale && !window.CREDITS_FETCHING){
+      window.CREDITS_FETCHING = true;
       postJSON('/accounts/credits', {}).then(r => {
         window.ACCOUNTS = r.accounts || ACCOUNTS;
         renderAccounts();
-      }).catch(()=>{});
+        loadGrowthTasks();   // 签到与福利中心卡片同步刷新
+      }).catch(()=>{}).finally(() => { window.CREDITS_FETCHING = false; });
     }
   }catch(e){ toast('账号加载失败: ' + e.message); }
 }
@@ -2686,6 +2712,19 @@ async function loadSettings(showToast){
     }
     const pEff = document.getElementById('setProxyEffective');
     if(pEff) pEff.textContent = '当前生效：' + (prox.effective || '-');
+    // 机器身份（固定 / 官方风控桥 / 派生假值）
+    const ident = data.machine_identity || {};
+    const identEl = document.getElementById('identityState');
+    if(identEl){
+      const srcText = ident.pinned ? '已固定（来自其他机器导出的真身份）'
+        : (ident.bridge_available ? '官方风控桥 · 真身份（本机有客户端）'
+        : '派生假身份（本机无客户端，定向活动可能被过滤）');
+      identEl.textContent = srcText;
+      identEl.style.color = ident.pinned ? 'var(--accent2)'
+        : (ident.bridge_available ? '#26bb82' : 'var(--warn)');
+    }
+    const identMeta = document.getElementById('identityMeta');
+    if(identMeta) identMeta.textContent = ident.preview ? ('（token ' + ident.preview + (ident.pinned_at ? ' · 固定于 ' + ident.pinned_at : '') + '）') : '';
     const set = (id, value) => { const el = document.getElementById(id); if(el) el.textContent = value || '-'; };
     set('setVersion', data.version);
     set('setAccountsDir', data.accounts_dir);
@@ -2711,6 +2750,58 @@ async function saveProxyConfig(btn){
   } catch(e) {
     toast('保存代理设置失败: ' + e.message, 'bad');
   } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* ---- 机器身份：导出（装有客户端的机器）/ 粘贴保存（服务器）/ 清除 ---- */
+async function exportIdentity(btn){
+  if(btn){ btn.disabled = true; btn.textContent = '导出中...'; }
+  try{
+    const r = await getJSON('/identity/export');
+    if(!r.ok){
+      toast('导出失败：' + (r.reason || '未知原因'), 'warn');
+      return;
+    }
+    const el = document.getElementById('setIdentityJson');
+    if(el) el.value = JSON.stringify(r.identity || {}, null, 2);
+    await writeClipboard(el ? el.value : '').catch(() => {});
+    toast('已导出并复制到剪贴板：到服务器看板粘贴保存即可', 'ok');
+  }catch(e){
+    toast('导出失败: ' + e.message, 'bad');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '导出本机身份'; }
+  }
+}
+
+async function saveIdentity(btn){
+  const raw = ((document.getElementById('setIdentityJson') || {}).value || '').trim();
+  if(!raw){ toast('先粘贴机器身份 JSON（在装有官方客户端的机器上点「导出本机身份」）', 'warn'); return; }
+  let obj;
+  try{ obj = JSON.parse(raw); }catch(e){ toast('JSON 格式不对：' + e.message, 'bad'); return; }
+  if(btn) btn.disabled = true;
+  try{
+    const r = await postJSON('/settings/save', {machine_identity: obj});
+    const v = r.machine_identity || {};
+    toast('机器身份已固定' + (v.preview ? '（token ' + v.preview + '）' : '') + '，签到/活动将使用该身份', 'ok');
+    await loadSettings();
+  }catch(e){
+    toast('保存失败: ' + e.message, 'bad');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function clearIdentity(btn){
+  if(!confirm('清除固定的机器身份？清除后本机将回退到自动获取（无客户端时为派生假身份）。')) return;
+  if(btn) btn.disabled = true;
+  try{
+    await postJSON('/settings/save', {machine_identity: null});
+    toast('已清除固定的机器身份', 'ok');
+    await loadSettings();
+  }catch(e){
+    toast('清除失败: ' + e.message, 'bad');
+  }finally{
     if(btn) btn.disabled = false;
   }
 }

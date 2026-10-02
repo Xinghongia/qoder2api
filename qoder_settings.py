@@ -328,6 +328,56 @@ def set_model_override(accounts_dir, key, context_window=None, effort=None):
         return item
 
 
+# ------------------------------------------------- machine identity
+# 服务器（Linux/Docker）没有官方客户端，取不到风控桥 runtime-info.exe，机器
+# 身份只能用"派生假值"，设备定向活动（每日 100 等）可能被服务端静默过滤。
+# 身份是**机器级、与区域无关**的（实测同一台机器上国内/国际账号经桥取到的
+# token/type/code 完全一致），因此允许把一台机器的真实身份**固定**到另一台：
+# 在装有官方客户端的机器上看板「导出本机身份」→ 到服务器看板粘贴保存。
+
+_IDENTITY_FIELDS = ("machineToken", "machineType", "machineCode")
+
+
+def machine_identity(accounts_dir):
+    """当前固定的机器身份（未固定返回 None）。"""
+    data = load(accounts_dir)
+    raw = data.get("machine_identity")
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key in _IDENTITY_FIELDS:
+        value = str(raw.get(key) or "").strip()
+        if not value:
+            return None
+        out[key] = value
+    if isinstance(raw.get("vmInfo"), dict):
+        out["vmInfo"] = raw["vmInfo"]
+    out["pinned_at"] = str(raw.get("pinned_at") or "")
+    return out
+
+
+def set_machine_identity(accounts_dir, identity):
+    """固定/清除机器身份；identity=None 表示清除。返回保存后的值。"""
+    with _lock:
+        data = load(accounts_dir)
+        if identity is None:
+            data.pop("machine_identity", None)
+        else:
+            clean = {}
+            for key in _IDENTITY_FIELDS:
+                value = str((identity or {}).get(key) or "").strip()
+                if not value:
+                    raise ValueError(
+                        "machine identity needs machineToken/machineType/machineCode")
+                clean[key] = value
+            if isinstance((identity or {}).get("vmInfo"), dict):
+                clean["vmInfo"] = identity["vmInfo"]
+            clean["pinned_at"] = time.strftime("%Y/%m/%d %H:%M")
+            data["machine_identity"] = clean
+        save(accounts_dir, data)
+        return machine_identity(accounts_dir)
+
+
 # ----------------------------------------------------------- outbound proxy
 # Panel-managed proxy mode for every outbound request (see qoder_net.py).
 # "system" follows the OS settings; "manual" uses proxy_url; "direct" never

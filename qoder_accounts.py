@@ -31,6 +31,7 @@ from qoder_fingerprint import (derive_id, generate_request_id,
                                derive_machine_token, derive_machine_type,
                                vm_status)
 import qoder_net
+import qoder_settings
 
 # ---------------------------------------------------------------------------
 # 区域常量（逆向自官方桌面/CLI 客户端）
@@ -276,6 +277,74 @@ def runtime_info_bridge_realm(realm):
     return _runtime_info_resolution(realm)[1]
 
 
+# ---------------------------------------------------------------------------
+# 机器身份固定（服务器没有官方风控桥时，对齐到装有客户端的机器）
+# ---------------------------------------------------------------------------
+# 身份是机器级、与区域无关的。服务器（Linux/Docker）装不了官方客户端，取不到
+# 桥就只能用派生假值，设备定向活动可能被静默过滤；把真机器的身份"导出→固定"
+# 过来即可完全对齐。来源优先级：QD_MACHINE_IDENTITY 环境变量 > 设置文件
+# （accounts/settings.json 的 machine_identity，由看板「机器身份」区保存）。
+
+def _settings_accounts_dir():
+    return os.environ.get("ACCOUNTS_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "accounts")
+
+
+def _pinned_machine_identity():
+    """固定的机器身份（未固定/不完整返回 None）。"""
+    data = None
+    raw = (os.environ.get("QD_MACHINE_IDENTITY") or "").strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        try:
+            data = qoder_settings.machine_identity(_settings_accounts_dir())
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return None
+    token = str(data.get("machineToken") or "").strip()
+    mtype = str(data.get("machineType") or "").strip()
+    code = str(data.get("machineCode") or "").strip()
+    if not (token and mtype and code):
+        return None
+    out = {"machineToken": token, "machineType": mtype, "machineCode": code}
+    if isinstance(data.get("vmInfo"), dict):
+        out["vmInfo"] = data["vmInfo"]
+    return out
+
+
+def export_bridge_identity(realm):
+    """导出本机机器身份（给没有官方客户端的机器固定用）。
+
+    已固定时直接返回固定值；否则调用官方风控桥取真值。
+    返回 (identity|None, reason)。
+    """
+    pin = _pinned_machine_identity()
+    if pin:
+        out = dict(pin)
+        out["source"] = "pinned"
+        return out, ""
+    exe = runtime_info_exe(realm)
+    if not exe:
+        return None, ("本机未找到官方风控桥 runtime-info.exe"
+                      "（该导出需要在装有官方客户端的机器上操作）")
+    data = run_runtime_info(realm, "")
+    token = str(data.get("machineToken") or "").strip()
+    mtype = str(data.get("machineType") or "").strip()
+    code = str(data.get("machineCode") or "").strip()
+    if not (token and mtype and code):
+        return None, "风控桥调用失败或返回不完整，请稍后重试"
+    out = {"machineToken": token, "machineType": mtype, "machineCode": code}
+    if isinstance(data.get("vmInfo"), dict):
+        out["vmInfo"] = data["vmInfo"]
+    out["source"] = "runtime-info"
+    return out, ""
+
+
 def run_runtime_info(realm, account_id=""):
     """调用官方 runtime-info.exe，返回其 JSON（失败返回 {}）。
 
@@ -327,10 +396,23 @@ def local_vm_status(realm=None, force=False):
 def native_machine_identity(realm, account_id, force=False):
     """调用官方原生桥取真实机器身份；任何失败返回 {}（调用方回退派生值）。
 
+    优先级：**固定身份（pinned）** > 官方风控桥（本区安装目录 → 本区 CLI
+    缓存 → 借用另一区域，见 `_realm_search_order`）> 派生回退。固定身份来自
+    QD_MACHINE_IDENTITY 环境变量或看板「机器身份」保存的设置（服务器对齐用）。
+
     身份是**机器级**的（实测不同 account id / 不同区域返回同一份），按区域
     缓存 NATIVE_IDENTITY_TTL 秒（长缓存；旧身份实测仍被服务端接受）；
     force=True 时跳过缓存重新取值（领取路径强制刷新，见 campaign_checkin）。
     """
+    pin = _pinned_machine_identity()
+    if pin:
+        ident = dict(pin)
+        vm_info = ident.get("vmInfo") if isinstance(ident.get("vmInfo"), dict) else {}
+        ident["vm"] = bool(vm_info.get("isVm"))
+        ident["vm_info"] = vm_info
+        ident["source"] = "pinned"
+        ident["bridge_realm"] = "pinned"
+        return ident
     now = time.time()
     if not force:
         hit = _native_ident_cache.get(realm)

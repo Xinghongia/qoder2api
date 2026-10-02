@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.0-2496ED?style=flat-square" alt="Version 1.2.0">
+  <img src="https://img.shields.io/badge/Release-v1.2.1-2496ED?style=flat-square" alt="Version 1.2.1">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -330,6 +330,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | POST | /accounts/checkin | 手动签到（单个/全部） |
 | GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
 | GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
+| GET | /identity/export | 导出本机机器身份（面板鉴权；给没有官方客户端的服务器固定用） |
 
 ---
 
@@ -383,6 +384,17 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.1
+
+**修复：部署端显示旧积分 / 用户以为"账号不对"**
+- `/tasks` 批量视图对**超过 3 分钟的快照自动重拉**（并行，多账号不拖慢）；账号行「签到」点击后**同步刷新该账号额度**；看板账号列表在快照过期（>180s）时自动调一次刷新——此前只有"完全缺失"的快照才拉取，部署端会一直显示几小时前的旧余额（**刷新页面也不变**，表现为"本地和服务器的积分不一样"）。
+
+**新增：机器身份固定（服务器对齐本机真身份）**
+- **背景**：官方风控按「机器身份」下发设备定向活动（每日 100 Credits 等）。Windows 装有官方客户端 → 自动取真身份；**Linux/服务器没有客户端** → 只能回退派生假身份，定向活动可能被静默过滤。身份与区域**无关**（实测同一台机器上国内/国际账号取到的 token/type/code 完全一致）；
+- **用法**：在装有官方客户端的机器上看板「设置 → 机器身份」点「导出本机身份」→ 复制 JSON → 到服务器看板粘贴「保存固定身份」。保存后约 20 秒内生效（无需重启）；「清除固定」即恢复自动获取；
+- **接口**：`GET /identity/export`（面板鉴权）导出本机身份；`POST /settings/save {"machine_identity": {...}|null}` 固定/清除；环境变量 `QD_MACHINE_IDENTITY`（JSON）优先级最高；
+- **解析顺序**：固定身份 > 官方风控桥（本区安装目录 → 本区 CLI 缓存 → 借用另一区域）> 派生回退。`_diag_campaign.py` 的身份行会标注「已固定」。
 
 ### v1.2.0
 
