@@ -24,7 +24,7 @@
 
 用法：
     python qoder_proxy.py --port 8790     # 终端 A
-    python _verify_models.py              # 终端 B（默认 --base http://127.0.0.1:8790）
+    python scripts/_verify_models.py      # 终端 B（默认 --base http://127.0.0.1:8790）
 退出码：0 全部通过；1 有失败；2 网关不可达。
 """
 import argparse
@@ -37,12 +37,14 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 
-import qoder_catalog as C
-import qoder_net
+from qoder2api import catalog as C
+from qoder2api import net as qoder_net
+from qoder2api import paths
 try:                       # 面板里选的代理模式对 --base 为远端时同样生效
-    import qoder_accounts as _qa
+    from qoder2api import accounts as _qa
     qoder_net.load_from_settings(_qa.ACCOUNTS_DIR)
 except Exception:
     pass
@@ -62,7 +64,7 @@ def check(realm, key, label, cond, extra=""):
 
 def official_catalog(realm):
     """解密本机官方客户端 catalog（chat 场景）——作为动态不可用时的按字段兜底。"""
-    from qoder_sign import qmc_decrypt
+    from qoder2api.sign import qmc_decrypt
     home = os.path.join(os.path.expanduser("~"),
                         ".qoder-cn" if realm == "cn" else ".qoder", ".models")
     with open(os.path.join(home, "default"), encoding="utf-8") as fh:
@@ -80,14 +82,14 @@ def official_live(realm):
     的字段用本地目录同 key 条目补齐（与网关 merge 的 None-保护一致）。
     """
     try:
-        import qoder_proxy as P
-        import qoder_accounts as A
-        if P.POOL is None:
-            pool_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "accounts")
-            P.POOL = A.AccountPool(pool_dir)
-            P.POOL.load()
-        dynamic = P.read_dynamic_models(realm=realm)
+        from qoder2api import accounts as A
+        from qoder2api import models as models_mod
+        from qoder2api import runtime as R
+        if R.POOL is None:
+            pool_dir = str(paths.accounts_dir())
+            R.POOL = A.AccountPool(pool_dir)
+            R.POOL.load()
+        dynamic = models_mod.read_dynamic_models(realm=realm)
     except Exception:
         dynamic = []
     local = {m["key"]: m for m in official_catalog(realm)}

@@ -1,4 +1,4 @@
-"""qoder_sign.py —— Qoder COSY 推理签名与请求体编码模块
+"""qoder2api.sign —— Qoder COSY 推理签名与请求体编码模块
 
 逆向自 Qoder 桌面/CLI 官方客户端与社区验证过的参考实现，包含三部分：
 
@@ -35,7 +35,8 @@ import time
 import uuid
 from urllib.parse import urlparse
 
-from qoder_fingerprint import derive_id, derive_machine_token, derive_machine_type
+from .fingerprint import (derive_id, derive_machine_token,
+                          derive_machine_type)
 
 # ---------------------------------------------------------------------------
 # Qoder 自定义 Base64 变体

@@ -10,9 +10,9 @@
   5. 结论与常见原因（对照官方规则）
 
 只读：不领取任何活动。用法：
-    python _diag_campaign.py            # 体检全部账号
-    python _diag_campaign.py --uid XX   # 只看某个账号（uid 前缀匹配）
-    python _diag_campaign.py --no-local # 跳过本机虚拟化状态检查
+    python scripts/_diag_campaign.py            # 体检全部账号
+    python scripts/_diag_campaign.py --uid XX   # 只看某个账号（uid 前缀匹配）
+    python scripts/_diag_campaign.py --no-local # 跳过本机虚拟化状态检查
 退出码：0=成功输出；1=无可用账号。
 """
 import argparse
@@ -21,13 +21,14 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-os.environ.setdefault("ACCOUNTS_DIR", os.path.join(HERE, "accounts"))
-os.environ.setdefault("USAGE_DIR", os.path.join(HERE, "usage"))
-os.chdir(HERE)
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
+os.environ.setdefault("ACCOUNTS_DIR", os.path.join(ROOT, "accounts"))
+os.environ.setdefault("USAGE_DIR", os.path.join(ROOT, "usage"))
+os.chdir(ROOT)
 
-import qoder_accounts as A   # noqa: E402
-import qoder_proxy as P      # noqa: E402
+from qoder2api import accounts as A   # noqa: E402
+import qoder_proxy as P               # noqa: E402
 
 RULES = """
 官方规则速查（详见 README「活动与新人权益规则」）：

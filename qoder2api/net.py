@@ -1,4 +1,4 @@
-"""qoder_net.py —— 全项目统一出站网络层（代理模式：跟随系统 / 手动 / 直连）
+"""qoder2api.net —— 全项目统一出站网络层（代理模式：跟随系统 / 手动 / 直连）
 
 项目所有出站 HTTP（账号 openapi、活动平台、模型清单、推理流、设备轮询、
 辅助脚本）统一经过这里，保证看板「设置 → 网络代理」里选的模式对**所有**
@@ -77,7 +77,7 @@ def configure(mode=None, url=None):
 def load_from_settings(accounts_dir):
     """从 accounts/settings.json 装载并生效（启动时调用；坏配置回退 system）。"""
     try:
-        import qoder_settings
+        from . import settings as qoder_settings
         cfg = qoder_settings.proxy_config(accounts_dir)
     except Exception:
         cfg = {"mode": "system", "url": ""}

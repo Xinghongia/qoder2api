@@ -7,15 +7,15 @@
        国内版  ~/.qoder-cn/.models/<uid>/catalog-v6
      （QMC v1：HKDF-SHA256(uid) + AES-256-GCM，见 qoder_sign.qmc_decrypt）
   2. 取 chat 场景条目**逐字段原样**写入
-       qoder_catalog_intl.json / qoder_catalog_cn.json
-     （网关运行时优先读这两个文件；`qoder_catalog.py` 里的内嵌副本只是
+       qoder2api/assets/qoder_catalog_intl.json / qoder_catalog_cn.json
+     （网关运行时优先读这两个文件；`qoder2api/catalog.py` 里的内嵌副本只是
        文件缺失时的冻结回退，默认一并更新，见 --inline/--no-inline）
   3. 打印与现有快照的差异摘要（价格倍率 / 上下文窗口 / 思考档位 / 上下架）
 
 用法：
-    python _refresh_catalog.py              # 更新 JSON + 内嵌回退，并打印差异
-    python _refresh_catalog.py --dry-run    # 只打印差异，不写文件
-    python _refresh_catalog.py --no-inline  # 只更新 JSON 快照文件
+    python scripts/_refresh_catalog.py              # 更新 JSON + 内嵌回退，并打印差异
+    python scripts/_refresh_catalog.py --dry-run    # 只打印差异，不写文件
+    python scripts/_refresh_catalog.py --no-inline  # 只更新 JSON 快照文件
 
 退出码：0=成功（含"无变化"）；1=任一侧读取/解密失败。
 """
@@ -26,10 +26,10 @@ import os
 import re
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
-from qoder_sign import qmc_decrypt  # noqa: E402
+from qoder2api.sign import qmc_decrypt  # noqa: E402
 
 REALMS = (
     ("intl", ".qoder", "qoder_catalog_intl.json", "_INTL_JSON"),
@@ -127,7 +127,7 @@ def main():
                     help="不更新 qoder_catalog.py 里的内嵌冻结副本")
     args = ap.parse_args()
 
-    catalog_py = os.path.join(HERE, "qoder_catalog.py")
+    catalog_py = os.path.join(ROOT, "qoder2api", "catalog.py")
     src = ""
     if not args.no_inline and not args.dry_run:
         with io.open(catalog_py, encoding="utf-8") as fh:
@@ -148,7 +148,7 @@ def main():
             print("  ! 解密失败: %s" % exc)
             failed += 1
             continue
-        out_path = os.path.join(HERE, out_name)
+        out_path = os.path.join(ROOT, "qoder2api", "assets", out_name)
         old = []
         if os.path.isfile(out_path):
             try:
@@ -171,7 +171,7 @@ def main():
         with io.open(catalog_py, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(src)
         print("=" * 66)
-        print("写入 qoder_catalog.py（内嵌冻结副本）")
+        print("写入 qoder2api/catalog.py（内嵌冻结副本）")
     return 1 if failed else 0
 
 

@@ -1,4 +1,4 @@
-"""qoder_fingerprint.py —— 统一设备指纹稳定派生模块 (derive_id)
+"""qoder2api.fingerprint —— 统一设备指纹稳定派生模块 (derive_id)
 
 无论是国内版 (qoder.com.cn / gateway.qoder.com.cn) 还是国际版
 (qoder.com / api1.qoder.sh，官方候选 api1→api2→api3)，均通过本模块基于账号

@@ -1482,7 +1482,8 @@ def _load_snapshot(filename, embedded):
     外部文件由 `_refresh_catalog.py` 从本机官方客户端目录缓存重新导出（客户端
     更新后重跑一次即可），格式与内嵌副本完全一致（chat 场景逐字段原样）。
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "assets", filename)
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)

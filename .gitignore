@@ -11,6 +11,15 @@ __pycache__/
 *.pyc
 *.pyo
 
+# ---- 测试临时数据目录 ----
+tests/_acc/
+tests/_use/
+
+# ---- 前端（web/）：只忽略依赖与构建中间产物，web/out 产物必须入库 ----
+web/node_modules/
+web/.next/
+web/tsconfig.tsbuildinfo
+
 # ---- 本地工具 / 临时文件 ----
 .mimosa/
 _shots/

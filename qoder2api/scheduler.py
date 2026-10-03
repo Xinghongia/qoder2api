@@ -1,4 +1,4 @@
-"""qoder_scheduler.py —— 后台定时调度器 (Scheduler)
+"""qoder2api.scheduler —— 后台定时调度器 (Scheduler)
 
 负责常驻后台自动执行：
 1. 每日签到 (Daily Checkin)：每日 09:00 / 21:00 为所有账号自动签到领积分。
@@ -10,8 +10,8 @@
 import threading
 import time
 
-import qoder_tasks
-from qoder_tasks import set_logger, run_batch_checkin, run_keepalive
+from . import tasks as qoder_tasks
+from .tasks import set_logger, run_batch_checkin, run_keepalive
 
 
 class Scheduler(object):

@@ -9,9 +9,9 @@
      —— 这一步能区分“网关没起” / “起了但不能流式” / “上游内容审核拒绝”
 
 用法：
-    python _diag_gateway.py                 # 只做 1-3
-    python _diag_gateway.py --chat          # 追加真实流式自检
-    python _diag_gateway.py --port 8790 --model Qwen3.8-Flash --key <API_KEY>
+    python scripts/_diag_gateway.py                 # 只做 1-3
+    python scripts/_diag_gateway.py --chat          # 追加真实流式自检
+    python scripts/_diag_gateway.py --port 8790 --model Qwen3.8-Flash --key <API_KEY>
 退出码：0=全部通过；1=有环节失败。
 """
 import argparse
@@ -24,8 +24,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import qoder_net          # 统一出站层；回环地址始终直连
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from qoder2api import net as qoder_net   # 统一出站层；回环地址始终直连
 
 OK = "[ OK ]"
 BAD = "[FAIL]"
@@ -68,7 +68,7 @@ def guard_url(url, allow_remote=False):
                 "host %r is not loopback; pass --allow-remote to probe a "
                 "remote gateway" % host)
         return url
-    from qoder_accounts import validate_public_http_url
+    from qoder2api.accounts import validate_public_http_url
     return validate_public_http_url(url)
 
 

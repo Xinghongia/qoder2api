@@ -5,29 +5,49 @@ structure, Qoder custom base64 round-trip), COSY signature layout, request
 body construction, SSE envelope unwrapping, Responses-API custom-tool
 translation, and check-in response normalization.
 
-    python _test_qoder.py
+    python tests/test_qoder.py
 """
 import hashlib
 import json
 import os
 import sys
+import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ.setdefault("ACCOUNTS_DIR",
-                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "_acc"))
-os.environ.setdefault("USAGE_DIR",
-                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "_use"))
+_HERE = os.path.dirname(os.path.abspath(__file__))        # tests/
+_ROOT = os.path.dirname(_HERE)                            # repo root
+
+def _read_all_sources():
+    """包内全部源码拼接：用于「源码里必须/不得出现某写法」的回归断言。"""
+    parts = []
+    for root, dirs, files in os.walk(os.path.join(_ROOT, "qoder2api")):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for f in sorted(files):
+            if f.endswith(".py"):
+                with open(os.path.join(root, f), encoding="utf-8") as fh:
+                    parts.append(fh.read())
+    return "\n".join(parts)
+
+
+_ALL_SRC = _read_all_sources()
+
+sys.path.insert(0, _ROOT)
+os.environ.setdefault("ACCOUNTS_DIR", os.path.join(_HERE, "_acc"))
+os.environ.setdefault("USAGE_DIR", os.path.join(_HERE, "_use"))
 # 离线测试不拉起客户端原生二进制（活动平台的机器身份桥）；测试里显式关闭
 os.environ.setdefault("QD_NATIVE_IDENTITY", "0")
 
-import qoder_proxy as P
-import qoder_sign as S
-import qoder_catalog as C
-import qoder_accounts as A
-import qoder_net
-import qoder_tasks as T
+from qoder2api.api import Handler
+from qoder2api import runtime, upstream, models, update, reasoning
+from qoder2api import chat_normalize, body as body_mod, sanitize, security, affinity
+from qoder2api import realm as realm_mod, usage as usage_mod
+from qoder2api import views as views_mod, auth as auth_mod, errors, logbus
+from qoder2api import responses as responses_mod
+from qoder2api import model_entry, settings as qoder_settings
+from qoder2api import sign as S
+from qoder2api import catalog as C
+from qoder2api import accounts as A
+from qoder2api import net as qoder_net
+from qoder2api import tasks as T
 
 PASS = FAIL = 0
 
@@ -93,7 +113,7 @@ print()
 print("[4] COSY session & bearer signature")
 sess = S.CosySession(uid="test-uid-001", nickname="tester",
                      access_token="dt-abc", refresh_token="drt-xyz")
-url = "https://gateway.qoder.com.cn" + P.CHAT_PATH
+url = "https://gateway.qoder.com.cn" + body_mod.CHAT_PATH
 body_enc = S.qoder_encode(b'{"x":1}')
 h = sess.headers(body_enc, url, model_key="qmodel", sse=True)
 check("has full cosy header set",
@@ -161,8 +181,8 @@ check("intl enabled flags = {qmodel_38max, qfmodel} (official plan state)",
       intl_en == {"qmodel_38max", "qfmodel"}, sorted(intl_en))
 check("cn all 14 enabled", len(cn_en) == 14, sorted(cn_en))
 # 全量列出（不按 enable 过滤）
-merged_i = P.merge_catalog([], realm="intl")
-merged_c = P.merge_catalog([], realm="cn")
+merged_i = models.merge_catalog([], realm="intl")
+merged_c = models.merge_catalog([], realm="cn")
 check("merge keeps FULL intl list (17, no enable filtering)", len(merged_i) == 17,
       len(merged_i))
 check("merge keeps FULL cn list (14)", len(merged_c) == 14, len(merged_c))
@@ -170,7 +190,7 @@ check("merge keeps FULL cn list (14)", len(merged_c) == 14, len(merged_c))
 dyn_keys = [("cmodel", {"key": "cmodel", "display_name": "Cantus"})]  # 反例占位
 primary15 = [(m["key"], dict(m)) for m in C.STATIC_INTL_MODELS
              if m["key"] not in ("cmodel", "smodel")]   # 模拟动态返回的 15 条
-merged_dyn = P.merge_catalog(primary15, realm="intl")
+merged_dyn = models.merge_catalog(primary15, realm="intl")
 check("merge follows primary set (dynamic 15 wins, static-only excluded)",
       len(merged_dyn) == 15 and
       {k for k, _ in merged_dyn} == {m["key"] for m in C.STATIC_INTL_MODELS}
@@ -229,7 +249,7 @@ check("format_model_id helper",
       C.format_model_id("gm51model", realm="cn"))
 
 # model_entry 输出
-me = P.model_entry("qmodel_38max", cn38)
+me = model_entry.model_entry("qmodel_38max", cn38)
 check("model_entry id = OFFICIAL model name (the value clients fill in)",
       me["id"] == "Qwen3.8-Max", me["id"])
 check("model_entry upstream_key kept", me["upstream_key"] == "qmodel_38max")
@@ -256,7 +276,7 @@ check("model_entry is_free/is_new", me.get("is_free") is True and me.get("is_new
 check("model_entry does NOT fabricate max_output_tokens (official data has none)",
       "max_output_tokens" not in me and "max_completion_tokens" not in me,
       sorted(k for k in me if "output" in k))
-me_off = P.model_entry("smodel", entry_i)
+me_off = model_entry.model_entry("smodel", entry_i)
 check("model_entry disabled shows enabled=false (badge, not filtered)",
       me_off["enabled"] is False)
 check("model_entry disabled_reason = OFFICIAL copy (not '未开放')",
@@ -270,13 +290,13 @@ check("official text loader: 17 zh descriptions",
 check("official local name ultimate -> zh",
       C.official_local_name("ultimate") != "" and C.official_local_name("ultimate") != "Ultimate",
       C.official_local_name("ultimate"))
-me_u = P.model_entry("ultimate", next(m for m in C.STATIC_INTL_MODELS if m["key"] == "ultimate"))
+me_u = model_entry.model_entry("ultimate", next(m for m in C.STATIC_INTL_MODELS if m["key"] == "ultimate"))
 check("model_entry name_local emitted for intl mode preset",
       bool(me_u.get("name_local")), me_u.get("name_local"))
 check("resolve official local label (Kimi-K2.7-Code)",
       C.resolve_upstream_key("Kimi-K2.7-Code", realm="intl") == "kmodel")
 check("cross-region guard accepts display id form",
-      P.exclusive_realm("gm51model (GLM-5.2)") == "cn")
+      realm_mod.exclusive_realm("gm51model (GLM-5.2)") == "cn")
 
 print()
 print("[5.8] off-peak (低谷) window detection — cross-midnight 22:00-08:00 UTC+8")
@@ -296,15 +316,15 @@ for hh, mm, expect, label in [
         (23, 30, True, "23:30 inside"),
         (7, 59, True, "07:59 last minute inside"),
         (8, 0, False, "08:00 window end (exclusive)")]:
-    got = P.off_peak_active_now("22:00", "08:00", tz="Asia/Shanghai",
+    got = model_entry.off_peak_active_now("22:00", "08:00", tz="Asia/Shanghai",
                                 now=_ts(hh, mm))
     check(f"window {label}", got is expect, f"got={got} expect={expect}")
 check("invalid window -> None",
-      P.off_peak_active_now(None, "08:00") is None)
+      model_entry.off_peak_active_now(None, "08:00") is None)
 check("same start/end -> always active",
-      P.off_peak_active_now("00:00", "00:00", now=_ts(13, 0)) is True)
+      model_entry.off_peak_active_now("00:00", "00:00", now=_ts(13, 0)) is True)
 # promotion fields surface off_peak_active_now via model_entry
-me_promo = P.model_entry("qmodel_38max", cn38)
+me_promo = model_entry.model_entry("qmodel_38max", cn38)
 check("model_entry exposes off_peak_active_now (bool)",
       isinstance(me_promo.get("off_peak_active_now"), bool),
       me_promo.get("off_peak_active_now"))
@@ -314,7 +334,7 @@ dyn_null = [("qmodel_38max", {"key": "qmodel_38max",
                                "context_config": None,
                                "thinking_config": None,
                                "price_factor": 0.2})]
-merged_null = dict(P.merge_catalog(dyn_null, realm="cn"))["qmodel_38max"]
+merged_null = dict(models.merge_catalog(dyn_null, realm="cn"))["qmodel_38max"]
 check("merge: dynamic None does NOT clobber static context_config",
       isinstance(merged_null.get("context_config"), dict)
       and "200K" in (merged_null.get("context_config") or {}),
@@ -337,7 +357,7 @@ for realm_name in ("cn", "intl"):
     # 每个促销模型都要产出完整 off_peak 输出（不止一个）
     for k in sorted(PROMO_KEYS):
         src = next(m for m in C.models_for_realm(realm_name) if m["key"] == k)
-        e = P.model_entry(k, src)
+        e = model_entry.model_entry(k, src)
         check(f"[{realm_name}] {k} entry carries off_peak window+badge",
               bool(e.get("off_peak")) and e.get("off_peak_window") == "22:00-08:00"
               and bool(e.get("off_peak", {}).get("badge")),
@@ -350,7 +370,7 @@ for realm_name in ("cn", "intl"):
               (e.get("price_factor_peak"), e.get("price_factor_valley")))
 # Qwen3.8-Max: is_free=true 绝不能吞掉它的 promotion（看板曾把它渲染成
 # 0.00x 免费并吃掉低谷高亮）
-me_freeflag = P.model_entry("qmodel_38max",
+me_freeflag = model_entry.model_entry("qmodel_38max",
                             next(m for m in C.STATIC_CN_MODELS
                                  if m["key"] == "qmodel_38max"))
 check("qmodel_38max is_free=true still carries promotion (peak 0.5 / valley 0.2)",
@@ -360,8 +380,10 @@ check("qmodel_38max is_free=true still carries promotion (peak 0.5 / valley 0.2)
        me_freeflag.get("price_factor_valley")))
 
 # 看板分支顺序回归：promo 分支必须在 0 价分支之前
-_dash = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "dashboard.html"), encoding="utf-8").read()
+# 迁移期：旧看板在 legacy/dashboard.html（新前端上线后由 web/ 取代，
+# 这一组断言随之作废；见 docs/refactor-notes 或 README「目录结构」）
+_DASH_PATH = os.path.join(_ROOT, "legacy", "dashboard.html")
+_dash = open(_DASH_PATH, encoding="utf-8").read() if os.path.isfile(_DASH_PATH) else ""
 _i_promo = _dash.find("if(promo && valley != null)")
 _i_free = _dash.find("valley === 0")
 check("dashboard: promotion branch BEFORE free branch (highlight no longer swallowed)",
@@ -375,15 +397,15 @@ import time as _time_for_11
 time = _time_for_11   # 本块直接使用 time.time()/sleep
 # 分类判定
 check("418 + provider_error is transient",
-      P._is_transient_upstream(418, '{"code":"provider_error","message":"Error in upstream response"}'))
-check("503 is transient", P._is_transient_upstream(503, ""))
+      upstream._is_transient_upstream(418, '{"code":"provider_error","message":"Error in upstream response"}'))
+check("503 is transient", upstream._is_transient_upstream(503, ""))
 check("client param error (invalid_parameter) NEVER transient",
-      not P._is_transient_upstream(400,
+      not upstream._is_transient_upstream(400,
           '{"code":"provider_error","details":"data: {\\"error\\":{\\"code\\":'
           '\\"invalid_parameter_error\\",\\"message\\":\\"Range of max_tokens should be [1, 131072]\\"}"'))
 check("plain 400 without provider_error not transient",
-      not P._is_transient_upstream(400, '{"code":"bad_request"}'))
-check("401 never transient", not P._is_transient_upstream(401, "provider_error"))
+      not upstream._is_transient_upstream(400, '{"code":"bad_request"}'))
+check("401 never transient", not upstream._is_transient_upstream(401, "provider_error"))
 
 # 行为级：第一次 418(瞬时) → 重试后成功，账号不背锅
 import urllib.error as _ue3, io as _io3
@@ -411,12 +433,12 @@ try:
     _pool.add(A.Account({"uid": "retry-test-uid", "realm": "cn",
                          "accessToken": "dt-test", "refreshToken": "drt-test",
                          "expiresAt": 9999999999}))
-    _orig_pool = P.POOL
-    P.POOL = _pool
+    _orig_pool = runtime.POOL
+    runtime.POOL = _pool
     _acc = _pool.accounts[0]
     _acc.cooldown_until = 0
     t0 = time.time()
-    resp, used, _ = P.open_upstream(
+    resp, used, _ = upstream.open_upstream(
         {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
          "stream": False}, target_realm="cn")
     took = time.time() - t0
@@ -440,13 +462,13 @@ def _urlopen_always_418(req, timeout=None):
 _calls["n"] = 0
 try:
     qoder_net.urlopen = _urlopen_always_418
-    P.POOL = _pool          # 上一块 finally 还原了 None，这里重新挂上临时池
+    runtime.POOL = _pool          # 上一块 finally 还原了 None，这里重新挂上临时池
     _acc.cooldown_until = 0
     _acc.last_error = ""
     raised = None
     t0 = time.time()
     try:
-        P.open_upstream({"model": "qfmodel",
+        upstream.open_upstream({"model": "qfmodel",
                          "messages": [{"role": "user", "content": "hi"}],
                          "stream": False}, target_realm="cn")
     except _ue3.HTTPError as e:
@@ -462,7 +484,7 @@ try:
           2.0 <= took <= 6.0, round(took, 2))
 finally:
     qoder_net.urlopen = _orig_urlopen
-    P.POOL = _orig_pool
+    runtime.POOL = _orig_pool
     import shutil as _sh
     _sh.rmtree(_td, ignore_errors=True)
 
@@ -470,23 +492,23 @@ finally:
 import urllib.error as _ue4
 import ssl as _ssl_for_11
 check("URLError wrapping SSL EOF is transient transport",
-      P._is_transient_transport(_ue4.URLError(_ssl_for_11.SSLError(
+      upstream._is_transient_transport(_ue4.URLError(_ssl_for_11.SSLError(
           "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF"))))
 check("ConnectionResetError is transient transport",
-      P._is_transient_transport(ConnectionResetError("reset")))
+      upstream._is_transient_transport(ConnectionResetError("reset")))
 check("plain ValueError NOT transient transport",
-      not P._is_transient_transport(ValueError("nope")))
+      not upstream._is_transient_transport(ValueError("nope")))
 check("predicate: URLError+provider401 not transient-http",
-      not P._is_transient_upstream(401, "x"))
+      not upstream._is_transient_upstream(401, "x"))
 
 # 友好错误映射
-_m, _t = P.friendly_upstream_error(418,
+_m, _t = upstream.friendly_upstream_error(418,
     '{"code":"provider_error","message":"Error in upstream response"}')
 check("friendly: 418 provider_error -> Chinese retry guidance",
       "上游瞬时故障" in _m and "请稍后重试" in _m, _m[:60])
 check("friendly: err_type tagged transient",
       _t == "upstream_transient_error", _t)
-_m2, _t2 = P.friendly_upstream_error(400,
+_m2, _t2 = upstream.friendly_upstream_error(400,
     '{"code":"provider_error","details":"invalid_parameter_error Range"}')
 check("friendly: client param error NOT reframed as transient",
       _t2 == "upstream_error" and "上游瞬时故障" not in _m2, (_t2, _m2[:50]))
@@ -501,25 +523,25 @@ check("raised HTTPError carries qoder_detail for handlers",
 print()
 print("[12] in-stream envelope retry (200-then-418 form — the reported log shape)")
 # 状态归一化
-check("_to_int_status str/int/fallback", P._to_int_status("418") == 418
-      and P._to_int_status(503) == 503 and P._to_int_status("xx") == 502)
+check("_to_int_status str/int/fallback", upstream._to_int_status("418") == 418
+      and upstream._to_int_status(503) == 503 and upstream._to_int_status("xx") == 502)
 
-_env418 = P.UpstreamStatus(
+_env418 = errors.UpstreamStatus(
     418, '{"code":"provider_error","message":"Error in upstream response"}')
 check("fresh envelope 418 transient -> retry",
-      P.should_retry_envelope(_env418, emitted_bytes=False, attempt=0))
+      upstream.should_retry_envelope(_env418, emitted_bytes=False, attempt=0))
 check("already emitted bytes -> NO retry",
-      not P.should_retry_envelope(_env418, emitted_bytes=True, attempt=0))
+      not upstream.should_retry_envelope(_env418, emitted_bytes=True, attempt=0))
 check("budget exhausted -> NO retry",
-      not P.should_retry_envelope(_env418, False, P.TRANSIENT_MAX_RETRIES))
-_env_param = P.UpstreamStatus(400, "invalid_parameter_error Range of max_tokens")
+      not upstream.should_retry_envelope(_env418, False, upstream.TRANSIENT_MAX_RETRIES))
+_env_param = errors.UpstreamStatus(400, "invalid_parameter_error Range of max_tokens")
 check("client param envelope -> NO retry",
-      not P.should_retry_envelope(_env_param, False, 0))
+      not upstream.should_retry_envelope(_env_param, False, 0))
 
 # aggregate_with_envelope_retry: 第一次信封418 → 重开上游 → 成功
 _sleeps = []
-_orig_sleep2 = P.time.sleep
-_orig_open2 = P.open_upstream
+_orig_sleep2 = time.sleep
+_orig_open2 = upstream.open_upstream
 _pools = {"calls": 0}
 
 class _GoodResp(object):
@@ -554,9 +576,9 @@ class _A(object):
 
 
 try:
-    P.time.sleep = lambda s: _sleeps.append(s)
-    P.open_upstream = _fake_open
-    obj, acc = P.aggregate_with_envelope_retry(
+    time.sleep = lambda s: _sleeps.append(s)
+    upstream.open_upstream = _fake_open
+    obj, acc = upstream.aggregate_with_envelope_retry(
         _ErrResp(), {"model": "qfmodel"}, None, "cn", "qfmodel",
         {"usage": None}, _A())
     check("envelope 418 -> reopened upstream and recovered",
@@ -565,8 +587,8 @@ try:
     check("reopen happened exactly once", _pools["calls"] == 1, _pools["calls"])
     check("backoff 1s recorded", _sleeps == [1], _sleeps)
 finally:
-    P.time.sleep = _orig_sleep2
-    P.open_upstream = _orig_open2
+    time.sleep = _orig_sleep2
+    upstream.open_upstream = _orig_open2
 
 # 非瞬时信封（客户端参数错）不重开、原样上抛
 _sleeps2 = []
@@ -578,11 +600,11 @@ _DI_DETAIL = ('{"error":{"message":"\\u003c400\\u003e InternalError.Algo.'
               'DataInspectionFailed: Input text data may contain inappropriate '
               'content.","type":"UnknownError"}}')
 check("DataInspection detail -> NOT transient (no wasted retries)",
-      not P._is_transient_upstream(418, _DI_DETAIL))
+      not upstream._is_transient_upstream(418, _DI_DETAIL))
 check("DataInspection envelope -> should_retry_envelope False",
-      not P.should_retry_envelope(
-          P.UpstreamStatus(418, _DI_DETAIL), emitted_bytes=False, attempt=0))
-_m13, _t13 = P.friendly_upstream_error(418, _DI_DETAIL)
+      not upstream.should_retry_envelope(
+          errors.UpstreamStatus(418, _DI_DETAIL), emitted_bytes=False, attempt=0))
+_m13, _t13 = upstream.friendly_upstream_error(418, _DI_DETAIL)
 check("friendly: content-policy Chinese explanation",
       "内容安全审核未通过" in _m13 and "重试无效" in _m13, _m13[:70])
 check("friendly: err_type content_policy_rejected",
@@ -599,32 +621,32 @@ _pool14 = A.AccountPool(_td14)
 _acc14 = A.Account({"uid": "u14", "realm": "cn", "accessToken": "dt-x",
                     "refreshToken": "drt-x", "expiresAt": 9999999999})
 _pool14.add(_acc14)
-_orig_pool14 = P.POOL
-P.POOL = _pool14
+_orig_pool14 = runtime.POOL
+runtime.POOL = _pool14
 try:
     # (a) 仅账号错误冷却 -> 不算频控
     _acc14.cooldown_until = _t14.time() + 5
     _acc14.model_cooldowns.clear()
-    throttled, w = P.realm_model_throttled("cn", "qfmodel")
+    throttled, w = upstream.realm_model_throttled("cn", "qfmodel")
     check("account error-cooldown is NOT a frequency-limit (no 429)",
           throttled is False, (throttled, w))
     check("retry_after_seconds ignores account cooldown",
-          P.retry_after_seconds("qfmodel", "cn") == 60,
-          P.retry_after_seconds("qfmodel", "cn"))
-    wait = P._short_error_cooldown_wait("cn", "qfmodel")
+          upstream.retry_after_seconds("qfmodel", "cn") == 60,
+          upstream.retry_after_seconds("qfmodel", "cn"))
+    wait = upstream._short_error_cooldown_wait("cn", "qfmodel")
     check("short error-cooldown wait surfaced (<=10s, >0)",
           0 < wait <= 10, wait)
     # (b) 上游频控 -> 正当429
     _acc14.cooldown_until = 0
     _acc14.model_cooldowns["qfmodel"] = _t14.time() + 60
-    throttled2, w2 = P.realm_model_throttled("cn", "qfmodel")
+    throttled2, w2 = upstream.realm_model_throttled("cn", "qfmodel")
     check("model_cooldowns (upstream 429) IS frequency-limit",
           throttled2 is True and w2 >= 59, (throttled2, w2))
     check("short wait suppressed while frequency-limited",
-          P._short_error_cooldown_wait("cn", "qfmodel") == 0.0)
+          upstream._short_error_cooldown_wait("cn", "qfmodel") == 0.0)
     check("retry_after reflects frequency wait",
-          59 <= P.retry_after_seconds("qfmodel", "cn") <= 61,
-          P.retry_after_seconds("qfmodel", "cn"))
+          59 <= upstream.retry_after_seconds("qfmodel", "cn") <= 61,
+          upstream.retry_after_seconds("qfmodel", "cn"))
     # (c) 行为：错误短冷却 -> 等待后续上（真实 sleep ~0.3s）而不是429
     _acc14.model_cooldowns.clear()
     _acc14.cooldown_until = _t14.time() + 0.3
@@ -651,7 +673,7 @@ try:
         _sleep_used = []
         _t0 = _t14.time()
         try:
-            resp, used, _ = P.open_upstream(
+            resp, used, _ = upstream.open_upstream(
                 {"model": "qfmodel",
                  "messages": [{"role": "user", "content": "hi"}],
                  "stream": False}, target_realm="cn")
@@ -675,19 +697,19 @@ try:
         qoder_net.urlopen = _ok_urlopen
         _raised14 = None
         try:
-            P.open_upstream({"model": "qfmodel",
+            upstream.open_upstream({"model": "qfmodel",
                              "messages": [{"role": "user", "content": "hi"}],
                              "stream": False}, target_realm="cn")
         except Exception as e14:
             _raised14 = e14
         check("genuine frequency limit still raises RateLimited fast",
-              isinstance(_raised14, P.RateLimited)
+              isinstance(_raised14, upstream.RateLimited)
               and "frequency" in str(getattr(_raised14, "detail", "")),
               repr(_raised14))
     finally:
         qoder_net.urlopen = _orig_urlopen14
 finally:
-    P.POOL = _orig_pool14
+    runtime.POOL = _orig_pool14
     _acc14.model_cooldowns.clear()
     _acc14.cooldown_until = 0
     import shutil as _sh14
@@ -695,14 +717,11 @@ finally:
 
 # favicon 404 静默
 check("log_message silences favicon regardless of status (code present)",
-      'req_path == "/favicon.ico"' in open(
-          os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "qoder_proxy.py"), encoding="utf-8").read())
+      'req_path == "/favicon.ico"' in _ALL_SRC)
 
 print()
 print("[15] HTTP/1.1 SSE framing — keep-alive friendly (no more reconnect loop)")
-_src15 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "qoder_proxy.py"), encoding="utf-8").read()
+_src15 = _ALL_SRC
 check("handler defines chunked SSE helpers",
       all(k in _src15 for k in ("def _sse_begin", "def _sse_write",
                                 "def _sse_end")))
@@ -749,7 +768,7 @@ def _slow_gen():
     yield b"data: late2\n\n"
 
 
-for item in P.sse_with_heartbeat(_slow_gen(), _sent2.append, interval=0.15,
+for item in upstream.sse_with_heartbeat(_slow_gen(), _sent2.append, interval=0.15,
                                  idle_limit=10):
     _slow.append(item)
 check("heartbeat: data passes through unchanged",
@@ -770,7 +789,7 @@ def _boom_gen():
 
 _sent3, _got3, _raised3 = [], [], None
 try:
-    for item in P.sse_with_heartbeat(_boom_gen(), _sent3.append, interval=0.15,
+    for item in upstream.sse_with_heartbeat(_boom_gen(), _sent3.append, interval=0.15,
                                      idle_limit=5):
         _got3.append(item)
 except Exception as exc:
@@ -785,7 +804,7 @@ def _one_gen():
 
 
 _sent4, _got4 = [], []
-for item in P.sse_with_heartbeat(_one_gen(), _sent4.append, interval=0,
+for item in upstream.sse_with_heartbeat(_one_gen(), _sent4.append, interval=0,
                                  idle_limit=5):
     _got4.append(item)
 check("heartbeat: interval=0 disables (pure pass-through)",
@@ -815,22 +834,22 @@ def _fake_open_never13(payload, session_key=None, target_realm=None):
 
 
 try:
-    P.time.sleep = lambda s: _sleeps13.append(s)
-    P.open_upstream = _fake_open_never13
+    time.sleep = lambda s: _sleeps13.append(s)
+    upstream.open_upstream = _fake_open_never13
     _raised13 = None
     try:
-        P.aggregate_with_envelope_retry(
+        upstream.aggregate_with_envelope_retry(
             _DiErrResp(), {"model": "Qwen3.8-Flash"}, None, "cn",
             "Qwen3.8-Flash", {"usage": None}, _A())
-    except P.UpstreamStatus as e13:
+    except errors.UpstreamStatus as e13:
         _raised13 = e13
     check("content-policy envelope: raised immediately, ZERO reopen, ZERO sleep",
           _raised13 is not None and _pools13["calls"] == 0 and not _sleeps13,
           {"raised": _raised13 is not None, "reopen": _pools13["calls"],
            "sleeps": _sleeps13})
 finally:
-    P.time.sleep = _orig_sleep2
-    P.open_upstream = _orig_open2
+    time.sleep = _orig_sleep2
+    upstream.open_upstream = _orig_open2
 
 # 非瞬时信封（客户端参数错）不重开、原样上抛
 _sleeps2 = []
@@ -853,21 +872,21 @@ def _fake_open_never(payload, session_key=None, target_realm=None):
 
 
 try:
-    P.time.sleep = lambda s: _sleeps2.append(s)
-    P.open_upstream = _fake_open_never
+    time.sleep = lambda s: _sleeps2.append(s)
+    upstream.open_upstream = _fake_open_never
     _raised_env = None
     try:
-        P.aggregate_with_envelope_retry(
+        upstream.aggregate_with_envelope_retry(
             _ParamErrResp(), {"model": "qfmodel"}, None, "cn", "qfmodel",
             {"usage": None}, _A())
-    except P.UpstreamStatus as e0:
+    except errors.UpstreamStatus as e0:
         _raised_env = e0
     check("param envelope raises immediately (no reopen)",
           _raised_env is not None and _pools2["calls"] == 0,
           {"raised": _raised_env is not None, "reopen": _pools2["calls"]})
 finally:
-    P.time.sleep = _orig_sleep2
-    P.open_upstream = _orig_open2
+    time.sleep = _orig_sleep2
+    upstream.open_upstream = _orig_open2
 
 ctx = {m["key"]: m.get("max_input_tokens") for m in C.STATIC_CN_MODELS}
 check("cn dmodel ctx = official 96000 (NOT a guess)", ctx.get("dmodel") == 96000,
@@ -881,22 +900,22 @@ check("price_factor carried from official catalog",
 check("exclusive sets derived from catalogs",
       "gm51model" in C.CN_EXCLUSIVE and "smodel" in C.INTL_EXCLUSIVE)
 check("exclusive realm detection: gm51model -> cn",
-      P.exclusive_realm("gm51model") == "cn")
+      realm_mod.exclusive_realm("gm51model") == "cn")
 check("exclusive realm detection: smodel -> intl",
-      P.exclusive_realm("smodel") == "intl")
+      realm_mod.exclusive_realm("smodel") == "intl")
 check("alias resolves before exclusive check: glm-5.2 -> cn",
-      P.exclusive_realm("glm-5.2") == "cn")
-check("shared key has no exclusive owner", P.exclusive_realm("qmodel") == "")
+      realm_mod.exclusive_realm("glm-5.2") == "cn")
+check("shared key has no exclusive owner", realm_mod.exclusive_realm("qmodel") == "")
 check("detect_model_realm routes cn-exclusive to cn even under intl default",
-      P.detect_model_realm("q37fmodel") == "cn")
+      realm_mod.detect_model_realm("q37fmodel") == "cn")
 check("detect_model_realm routes intl-exclusive to intl",
-      P.detect_model_realm("performance") == "intl")
+      realm_mod.detect_model_realm("performance") == "intl")
 check("shared model follows current default realm",
-      P.detect_model_realm("qmodel") == P.CURRENT_REALM)
+      realm_mod.detect_model_realm("qmodel") == runtime.CURRENT_REALM)
 
 print()
 print("[5.6] check-in capability is probed at runtime (not hard-coded per realm)")
-import qoder_accounts as _A
+import qoder2api.accounts as _A
 import urllib.error as _ue2, io as _io2
 check("cn has_checkin hint True", _A.get_realm_config("cn")["has_checkin"] is True)
 check("intl has_checkin hint False (still only a hint)",
@@ -1097,7 +1116,7 @@ check("no campaigns -> legacy reason still surfaced (nothing silently claimed)",
 
 print()
 print("[6] request body construction")
-body = P.build_qoder_body({
+body = body_mod.build_qoder_body({
     "model": "qmodel_38max",
     "messages": [{"role": "system", "content": "You are X."},
                  {"role": "user", "content": "hello"}],
@@ -1125,7 +1144,7 @@ check("no client tools -> tools emptied (template agent tools dropped)",
       body["tools"] == [])
 check("business.name from prompt", body["business"]["name"] == "hello")
 
-body2 = P.build_qoder_body({
+body2 = body_mod.build_qoder_body({
     "model": "qmodel",
     "messages": [{"role": "user", "content": "a"},
                  {"role": "assistant", "content": "b"},
@@ -1149,7 +1168,7 @@ check("client tools kept", len(body2["tools"]) == 1)
 check("latest prompt is c", body2["chat_context"]["text"]["text"] == "c")
 
 # tool 角色降级 + assistant tool_calls 序列化
-body3 = P.build_qoder_body({
+body3 = body_mod.build_qoder_body({
     "model": "qmodel",
     "messages": [
         {"role": "user", "content": "run"},
@@ -1176,47 +1195,47 @@ _ds_trace = [
     {"role": "user", "content": "再+1"},
 ]
 check("is_deepseek_model: upstream keys", 
-      P.is_deepseek_model("", "dfmodel") and P.is_deepseek_model("", "dmodel"))
+      chat_normalize.is_deepseek_model("", "dfmodel") and chat_normalize.is_deepseek_model("", "dmodel"))
 check("is_deepseek_model: client-visible names",
-      P.is_deepseek_model("DeepSeek-Flash") and P.is_deepseek_model("deepseek-v4-pro")
-      and P.is_deepseek_model("DeepSeek-V4-Pro"))
+      chat_normalize.is_deepseek_model("DeepSeek-Flash") and chat_normalize.is_deepseek_model("deepseek-v4-pro")
+      and chat_normalize.is_deepseek_model("DeepSeek-V4-Pro"))
 check("is_deepseek_model: display id form",
-      P.is_deepseek_model("dfmodel (DeepSeek-Flash)"))
+      chat_normalize.is_deepseek_model("dfmodel (DeepSeek-Flash)"))
 check("is_deepseek_model: non-DeepSeek models stay untouched",
-      not P.is_deepseek_model("qmodel") and not P.is_deepseek_model("Qwen3.8-Max"))
+      not chat_normalize.is_deepseek_model("qmodel") and not chat_normalize.is_deepseek_model("Qwen3.8-Max"))
 
-_bf_key = P.backfill_reasoning_content([dict(m) for m in _ds_trace], "dfmodel",
+_bf_key = chat_normalize.backfill_reasoning_content([dict(m) for m in _ds_trace], "dfmodel",
                                        "dfmodel")
 check("client using key 'dfmodel' NOW gets the backfill (regression)",
       all("reasoning_content" in m for m in _bf_key
           if m.get("role") == "assistant"), _bf_key)
-_bf_name = P.backfill_reasoning_content([dict(m) for m in _ds_trace],
+_bf_name = chat_normalize.backfill_reasoning_content([dict(m) for m in _ds_trace],
                                         "DeepSeek-Flash", "dfmodel")
 check("display name path still works (no regression)",
       any(m.get("reasoning_content") == "简单加法" for m in _bf_name))
-_bf_other = P.backfill_reasoning_content(
+_bf_other = chat_normalize.backfill_reasoning_content(
     [{"role": "user", "content": "q"},
      {"role": "assistant", "content": "a", "reasoning_content": "trace"}],
     "qmodel", "qmodel")
 check("non-DeepSeek model: no reasoning_content added by the backfill",
       _bf_other[1] == {"role": "assistant", "content": "a",
                        "reasoning_content": "trace"})
-_st_other, _flat_other, _ = P.flatten_messages(_bf_other, keep_reasoning=False)
+_st_other, _flat_other, _ = body_mod.flatten_messages(_bf_other, keep_reasoning=False)
 check("flatten drops reasoning_content for non-DeepSeek upstreams",
       all("reasoning_content" not in m for m in _flat_other), _flat_other)
-_st_ds, _flat_ds, _ = P.flatten_messages(
+_st_ds, _flat_ds, _ = body_mod.flatten_messages(
     [{"role": "user", "content": "q"},
      {"role": "assistant", "content": "a", "reasoning_content": "trace"}],
     keep_reasoning=True)
 check("flatten KEEPS reasoning_content for DeepSeek upstreams (was dropped)",
       _flat_ds[1].get("reasoning_content") == "trace", _flat_ds)
-_no_trace = P.backfill_reasoning_content(
+_no_trace = chat_normalize.backfill_reasoning_content(
     [{"role": "user", "content": "hi"}], "dfmodel", "dfmodel")
 check("no reasoning trace in history -> no synthetic field",
       all("reasoning_content" not in m for m in _no_trace))
 
 # 端到端：build_qoder_body 用显式 key 调用时也会补
-_body_ds = P.build_qoder_body({
+_body_ds = body_mod.build_qoder_body({
     "model": "dfmodel",
     "messages": [
         {"role": "user", "content": "1+1=?"},
@@ -1252,11 +1271,11 @@ class FakeResp(object):
 
 
 holder = {}
-lines = list(P.iter_inner_sse(FakeResp(), holder=holder))
+lines = list(upstream.iter_inner_sse(FakeResp(), holder=holder))
 check("unwrapped to standard data lines", len(lines) == 2
       and lines[0].startswith(b"data: "))
 check("usage captured in holder", (holder.get("usage") or {}).get("total_tokens") == 5)
-agg = P.aggregate_stream(FakeResp(), "qmodel", None, holder={})
+agg = upstream.aggregate_stream(FakeResp(), "qmodel", None, holder={})
 check("aggregate content", agg["choices"][0]["message"]["content"] == "hi")
 check("aggregate finish stop", agg["choices"][0]["finish_reason"] == "stop")
 check("aggregate usage", agg.get("usage", {}).get("total_tokens") == 5)
@@ -1270,9 +1289,9 @@ class ErrResp(object):
 
 
 try:
-    list(P.iter_inner_sse(ErrResp()))
+    list(upstream.iter_inner_sse(ErrResp()))
     check("non-200 envelope raises UpstreamStatus", False)
-except P.UpstreamStatus as exc:
+except errors.UpstreamStatus as exc:
     check("non-200 envelope raises UpstreamStatus",
           str(exc.status) == "503" and "quota" in exc.detail)
 
@@ -1280,7 +1299,7 @@ except P.UpstreamStatus as exc:
 noisy = json.dumps({"choices": [{"delta": {"function_call": {"name": "",
                                                              "arguments": ""},
                                            "reasoning_content": ""}}]})
-cleaned = P.clean_chunk(noisy)
+cleaned = sanitize.clean_chunk(noisy)
 check("empty function_call noise stripped",
       cleaned == "" or "function_call" not in cleaned, cleaned)
 
@@ -1293,7 +1312,7 @@ CUSTOM_TOOL = {"type": "custom", "name": "apply_patch",
 FUNC_TOOL = {"type": "function", "name": "get_weather",
              "description": "weather",
              "parameters": {"type": "object", "properties": {}}}
-chat = P.responses_to_chat({"model": "m", "input": "hi",
+chat = responses_mod.responses_to_chat({"model": "m", "input": "hi",
                             "tools": [CUSTOM_TOOL, FUNC_TOOL]})
 tools = chat["tools"]
 check("custom tool became type=function", tools[0]["type"] == "function",
@@ -1310,7 +1329,7 @@ hist = {"model": "m", "input": [
      "input": "*** Begin Patch\n+hi\n*** End Patch"},
     {"type": "custom_tool_call_output", "call_id": "call_1", "output": "Done!"},
 ]}
-c2msgs = P.responses_to_chat(hist)["messages"]
+c2msgs = responses_mod.responses_to_chat(hist)["messages"]
 asst = [m for m in c2msgs if m.get("role") == "assistant" and m.get("tool_calls")]
 check("assistant carries the tool call", len(asst) == 1)
 check("payload wrapped as {input: ...}",
@@ -1325,7 +1344,7 @@ chat_obj = {"choices": [{"finish_reason": "tool_calls", "message": {
     "tool_calls": [{"id": "call_7", "type": "function", "function": {
         "name": "apply_patch",
         "arguments": json.dumps({"input": "*** Begin Patch\n+ok\n*** End Patch"})}}]}}]}
-r = P.chat_to_response(chat_obj, "m", {"apply_patch"})
+r = responses_mod.chat_to_response(chat_obj, "m", {"apply_patch"})
 item = r["output"][0]
 check("non-stream re-inflated to custom_tool_call",
       item["type"] == "custom_tool_call", item.get("type"))
@@ -1339,7 +1358,7 @@ hist_r = {"model": "m", "input": [
      "summary": [{"type": "summary_text", "text": "let me think"}]},
     {"type": "message", "role": "assistant", "content": "4"},
 ]}
-cr = P.responses_to_chat(hist_r)["messages"]
+cr = responses_mod.responses_to_chat(hist_r)["messages"]
 asst_r = [m for m in cr if m.get("role") == "assistant"]
 check("reasoning attached to assistant",
       len(asst_r) == 1 and asst_r[0].get("reasoning_content") == "let me think")
@@ -1361,7 +1380,7 @@ stream = [
     chunk({}, "tool_calls"),
 ]
 holder2 = {"usage": None, "custom_names": {"apply_patch"}}
-raw_events = b"".join(P.stream_responses_events(iter(stream), "m", holder2))
+raw_events = b"".join(responses_mod.stream_responses_events(iter(stream), "m", holder2))
 text = raw_events.decode()
 check("created event first", "response.created" in text)
 check("custom_tool_call_input.delta present",
@@ -1478,7 +1497,7 @@ else:
 print()
 print("[4.6] local credential scan (reads THIS machine's official stores)")
 try:
-    import qoder_accounts as _QA
+    import qoder2api.accounts as _QA
     detected = _QA.scan_desktop_credentials()
     check("scan returns both realms", len(detected) >= 2, len(detected))
     realms_seen = {d["realm"] for d in detected}
@@ -1499,28 +1518,28 @@ except Exception as exc:
 print()
 print("[10] gateway plumbing")
 check("detect_model_realm fallback to current",
-      P.detect_model_realm("mystery-model") == P.CURRENT_REALM)
-check("CORS on API path", P.cors_origin_allowed("/v1/chat/completions"))
-check("no CORS on management", not P.cors_origin_allowed("/accounts"))
-check("no CORS on /v1/usage", not P.cors_origin_allowed("/v1/usage"))
-check("realm persisted file name", P.REALM_STATE_FILE.endswith("active_realm.json"))
+      realm_mod.detect_model_realm("mystery-model") == runtime.CURRENT_REALM)
+check("CORS on API path", security.cors_origin_allowed("/v1/chat/completions"))
+check("no CORS on management", not security.cors_origin_allowed("/accounts"))
+check("no CORS on /v1/usage", not security.cors_origin_allowed("/v1/usage"))
+check("realm persisted file name", runtime.REALM_STATE_FILE.endswith("active_realm.json"))
 # 会话亲和键稳定性
-k1 = P.derive_affinity_key([{"role": "system", "content": "s"},
+k1 = affinity.derive_affinity_key([{"role": "system", "content": "s"},
                              {"role": "user", "content": "u1"}])
-k2 = P.derive_affinity_key([{"role": "system", "content": "s"},
+k2 = affinity.derive_affinity_key([{"role": "system", "content": "s"},
                              {"role": "user", "content": "u1"},
                              {"role": "assistant", "content": "a"}])
-k3 = P.derive_affinity_key([{"role": "system", "content": "s"},
+k3 = affinity.derive_affinity_key([{"role": "system", "content": "s"},
                              {"role": "user", "content": "different"}])
 check("affinity key stable across turns", k1 == k2)
 check("affinity key differs per conversation", k1 != k3)
 # prompt fingerprint privacy
-fp = P.prompt_fingerprint([{"role": "system", "content": "secret system"}])
+fp = affinity.prompt_fingerprint([{"role": "system", "content": "secret system"}])
 check("fingerprint has no raw text",
       "secret" not in json.dumps(fp) and len(fp.get("system_sha", "")) == 12)
 
 # flatten / sanitize
-sys_text, flat, images = P.flatten_messages([
+sys_text, flat, images = body_mod.flatten_messages([
     {"role": "system", "content": "base"},
     {"role": "user", "content": [{"type": "text", "text": "part1"},
                                   {"type": "image_url",
@@ -1531,7 +1550,7 @@ check("text parts joined", flat[0]["content"] == "part1")
 check("image collected", images == ["data:image/png;base64,AAA"])
 check("fingerprint string sanitized",
       "You are Claude Code, Anthropic's official CLI tool" in
-      P.sanitize_text("You are Claude Code, Anthropic's official CLI tool for Claude"))
+      sanitize.sanitize_text("You are Claude Code, Anthropic's official CLI tool for Claude"))
 
 print()
 print("[18] task center lists every realm (issue #1: intl check-in was filtered out)")
@@ -1673,15 +1692,15 @@ def _fake_urlopen19(req, timeout=None):
     return _Resp19()
 
 
-_orig_pool19 = P.POOL
+_orig_pool19 = runtime.POOL
 _pool19 = A.AccountPool(os.path.join(os.environ["ACCOUNTS_DIR"], "unused19"))
 _pool19.accounts = [A.Account({"uid": "h19", "realm": "intl",
                                "domain": "qoder.com",
                                "accessToken": "dt-x"})]
-P.POOL = _pool19
+runtime.POOL = _pool19
 qoder_net.urlopen = _fake_urlopen19
 try:
-    _resp19, _acc19, _ = P.open_upstream(
+    _resp19, _acc19, _ = upstream.open_upstream(
         {"model": "qmodel", "stream": True,
          "messages": [{"role": "user", "content": "hi"}]},
         target_realm="intl")
@@ -1690,7 +1709,7 @@ except Exception as exc:                      # pragma: no cover - failure path
     _err19 = exc
 finally:
     qoder_net.urlopen = _orig_urlopen19
-    P.POOL = _orig_pool19
+    runtime.POOL = _orig_pool19
 
 check("failover: request succeeded after primary host transport error",
       _err19 is None and _acc19.uid == "h19", _err19)
@@ -1698,7 +1717,7 @@ check("failover: both hosts were tried in order (api1 then api2)",
       len(_hits19) == 2 and "api1.qoder.sh" in _hits19[0]
       and "api2.qoder.sh" in _hits19[1], _hits19)
 check("failover: signature path unchanged across hosts",
-      _hits19[0].split("?")[0].endswith(P.CHAT_PATH.split("?")[0]),
+      _hits19[0].split("?")[0].endswith(body_mod.CHAT_PATH.split("?")[0]),
       _hits19[0])
 
 print()
@@ -1867,67 +1886,67 @@ _meta_df = next(m for m in C.models_for_realm("cn") if m["key"] == "dfmodel")
 _meta_qf = next(m for m in C.models_for_realm("cn") if m["key"] == "qfmodel")
 _meta_qm = next(m for m in C.models_for_realm("cn") if m["key"] == "qmodel")
 check("supported_efforts reads the official levels",
-      P.supported_efforts(_meta_qf) == ["low", "medium", "xhigh"]
-      and P.supported_efforts(_meta_df) == ["low", "high", "max"]
-      and P.supported_efforts(_meta_qm) == [], P.supported_efforts(_meta_df))
+      reasoning.supported_efforts(_meta_qf) == ["low", "medium", "xhigh"]
+      and reasoning.supported_efforts(_meta_df) == ["low", "high", "max"]
+      and reasoning.supported_efforts(_meta_qm) == [], reasoning.supported_efforts(_meta_df))
 check("default_effort reads the official is_default mark",
-      P.default_effort(_meta_qf) == "medium" and P.default_effort(_meta_df) == "max",
-      (P.default_effort(_meta_qf), P.default_effort(_meta_df)))
-_v, _n = P.normalize_reasoning_effort("none", _meta_qf)
+      reasoning.default_effort(_meta_qf) == "medium" and reasoning.default_effort(_meta_df) == "max",
+      (reasoning.default_effort(_meta_qf), reasoning.default_effort(_meta_df)))
+_v, _n = reasoning.normalize_reasoning_effort("none", _meta_qf)
 check("none stays none (universal off switch)", _v == "none")
-_v, _n = P.normalize_reasoning_effort("medium", _meta_qf)
+_v, _n = reasoning.normalize_reasoning_effort("medium", _meta_qf)
 check("supported level passes through untouched", _v == "medium" and not _n, _n)
-_v, _n = P.normalize_reasoning_effort("medium", _meta_df)
+_v, _n = reasoning.normalize_reasoning_effort("medium", _meta_df)
 check("unsupported level maps to the nearest legal one (dfmodel medium->high)",
       _v == "high" and "unsupported" in _n, (_v, _n))
-_v, _n = P.normalize_reasoning_effort("xhigh", _meta_df)
+_v, _n = reasoning.normalize_reasoning_effort("xhigh", _meta_df)
 check("dfmodel xhigh -> max (nearest to request/default)", _v == "max", (_v, _n))
-_v, _n = P.normalize_reasoning_effort("max", _meta_qf)
+_v, _n = reasoning.normalize_reasoning_effort("max", _meta_qf)
 check("qfmodel max -> xhigh", _v == "xhigh", (_v, _n))
-_v, _n = P.normalize_reasoning_effort("high", _meta_qf)
+_v, _n = reasoning.normalize_reasoning_effort("high", _meta_qf)
 check("qfmodel high -> medium (tie broken toward the default)",
       _v == "medium", (_v, _n))
-_v, _n = P.normalize_reasoning_effort("low", _meta_qm)
+_v, _n = reasoning.normalize_reasoning_effort("low", _meta_qm)
 check("model without levels: effort param is dropped (not sent blindly)",
       _v is None and "dropped" in _n, (_v, _n))
-_v, _n = P.normalize_reasoning_effort("none", _meta_qm)
+_v, _n = reasoning.normalize_reasoning_effort("none", _meta_qm)
 check("model without levels still honours none", _v == "none")
 # 路由器（auto 等）目录里没有 thinking_config：不猜测，原样透传
 _meta_auto = next(m for m in C.models_for_realm("cn") if m["key"] == "auto")
 check("router model without thinking_config passes the value through verbatim",
-      P.normalize_reasoning_effort("high", _meta_auto) == ("high", "")
-      and P.normalize_reasoning_effort("bogus", _meta_auto) == ("bogus", ""),
-      P.normalize_reasoning_effort("high", _meta_auto))
+      reasoning.normalize_reasoning_effort("high", _meta_auto) == ("high", "")
+      and reasoning.normalize_reasoning_effort("bogus", _meta_auto) == ("bogus", ""),
+      reasoning.normalize_reasoning_effort("high", _meta_auto))
 # 未命中取最近合法档位：逐模型校验（同距偏向默认档）
 for _key, _want in (("dmodel", {"medium": "high", "xhigh": "max", "low": "high"}),
                     ("gfmodel", {"medium": "high", "xhigh": "max"}),
                     ("kmodel", {"medium": "high", "xhigh": "max"})):
     _m = next(m for m in C.models_for_realm("cn") if m["key"] == _key)
-    _got = {e: P.normalize_reasoning_effort(e, _m)[0] for e in _want}
+    _got = {e: reasoning.normalize_reasoning_effort(e, _m)[0] for e in _want}
     check("nearest-legal mapping on %s" % _key, _got == _want, (_got, _want))
 # Responses API 路径：reasoning.effort / reasoning_effort 都要能到上游
-_rchat = P.responses_to_chat({"model": "Qwen3.8-Flash", "input": "hi",
+_rchat = responses_mod.responses_to_chat({"model": "Qwen3.8-Flash", "input": "hi",
                               "reasoning": {"effort": "xhigh"}})
-_rbody = P.build_qoder_body(dict(_rchat, model="Qwen3.8-Flash"), None,
+_rbody = body_mod.build_qoder_body(dict(_rchat, model="Qwen3.8-Flash"), None,
                             "qfmodel", realm="cn")
 check("Responses API reasoning.effort reaches upstream (normalized)",
       (_rbody.get("parameters") or {}).get("reasoning_effort") == "xhigh",
       (_rbody.get("parameters") or {}).get("reasoning_effort"))
 
 # build_qoder_body: 端到端确认发到上游的档位已归一化 + thinking.* 兼容
-_body_eff = P.build_qoder_body(
+_body_eff = body_mod.build_qoder_body(
     {"model": "dfmodel", "messages": [{"role": "user", "content": "hi"}],
      "reasoning_effort": "medium"}, None, "dfmodel", realm="cn")
 check("build_qoder_body sends the normalized effort upstream",
       (_body_eff.get("parameters") or {}).get("reasoning_effort") == "high",
       (_body_eff.get("parameters") or {}).get("reasoning_effort"))
-_body_th = P.build_qoder_body(
+_body_th = body_mod.build_qoder_body(
     {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
      "thinking": {"effort": "xhigh"}}, None, "qfmodel", realm="cn")
 check("thinking.effort is accepted as an alias",
       (_body_th.get("parameters") or {}).get("reasoning_effort") == "xhigh",
       (_body_th.get("parameters") or {}).get("reasoning_effort"))
-_body_off = P.build_qoder_body(
+_body_off = body_mod.build_qoder_body(
     {"model": "qmodel", "messages": [{"role": "user", "content": "hi"}],
      "reasoning_effort": "high"}, None, "qmodel", realm="cn")
 check("unsupported effort on a level-less model is dropped from the body",
@@ -2021,58 +2040,58 @@ finally:
 print()
 print("[22] realm modes (intl / cn / both + failover) & quota-aware account pick")
 
-_orig_accounts_dir22 = P.ACCOUNTS_DIR
-_orig_state_file22 = P.REALM_STATE_FILE
-_orig_mode22 = (P.REALM_MODE, P.REALM_PREFERRED, P.CURRENT_REALM)
+_orig_accounts_dir22 = runtime.ACCOUNTS_DIR
+_orig_state_file22 = runtime.REALM_STATE_FILE
+_orig_mode22 = (runtime.REALM_MODE, runtime.REALM_PREFERRED, runtime.CURRENT_REALM)
 import tempfile as _tf22
 _TD22 = _tf22.mkdtemp(prefix="qdrealm_")
-P.ACCOUNTS_DIR = _TD22
-P.REALM_STATE_FILE = os.path.join(_TD22, "active_realm.json")
+runtime.ACCOUNTS_DIR = _TD22
+runtime.REALM_STATE_FILE = os.path.join(_TD22, "active_realm.json")
 try:
-    P.save_persisted_realm("cn")
+    realm_mod.save_persisted_realm("cn")
     check("single realm: candidates = [cn]; explicit binding still wins",
-          P.realm_candidates(model="Qwen3.8-Flash") == ["cn"]
-          and P.realm_candidates(model="Qwen3.8-Flash", explicit="intl") == ["intl"])
-    P.save_persisted_realm("both", "intl")
+          realm_mod.realm_candidates(model="Qwen3.8-Flash") == ["cn"]
+          and realm_mod.realm_candidates(model="Qwen3.8-Flash", explicit="intl") == ["intl"])
+    realm_mod.save_persisted_realm("both", "intl")
     check("both mode: preferred first, other realm as automatic fallback",
-          P.realm_candidates(model="Qwen3.8-Flash") == ["intl", "cn"])
+          realm_mod.realm_candidates(model="Qwen3.8-Flash") == ["intl", "cn"])
     check("exclusive model pins to its owner realm even in both mode",
-          P.realm_candidates(model="q37fmodel") == ["cn"]
-          and P.realm_candidates(model="smodel") == ["intl"],
-          (P.realm_candidates(model="q37fmodel"),
-           P.realm_candidates(model="smodel")))
+          realm_mod.realm_candidates(model="q37fmodel") == ["cn"]
+          and realm_mod.realm_candidates(model="smodel") == ["intl"],
+          (realm_mod.realm_candidates(model="q37fmodel"),
+           realm_mod.realm_candidates(model="smodel")))
 
-    with open(P.REALM_STATE_FILE, "w", encoding="utf-8") as _fh22:
+    with open(runtime.REALM_STATE_FILE, "w", encoding="utf-8") as _fh22:
         json.dump({"realm": "cn"}, _fh22)
-    P.REALM_MODE, P.REALM_PREFERRED = "intl", "intl"
-    P.load_persisted_realm()
+    runtime.REALM_MODE, runtime.REALM_PREFERRED = "intl", "intl"
+    realm_mod.load_persisted_realm()
     check("legacy state file {\"realm\": cn} loads as single-realm mode",
-          P.REALM_MODE == "cn" and P.REALM_PREFERRED == "cn"
-          and P.CURRENT_REALM == "cn")
-    with open(P.REALM_STATE_FILE, "w", encoding="utf-8") as _fh22:
+          runtime.REALM_MODE == "cn" and runtime.REALM_PREFERRED == "cn"
+          and runtime.CURRENT_REALM == "cn")
+    with open(runtime.REALM_STATE_FILE, "w", encoding="utf-8") as _fh22:
         json.dump({"mode": "both", "preferred": "intl"}, _fh22)
-    P.load_persisted_realm()
+    realm_mod.load_persisted_realm()
     check("two-realm state file loads mode+preferred",
-          P.REALM_MODE == "both" and P.REALM_PREFERRED == "intl")
+          runtime.REALM_MODE == "both" and runtime.REALM_PREFERRED == "intl")
 
-    _orig_pool22 = P.POOL
+    _orig_pool22 = runtime.POOL
     _orig_count_ready22 = A.AccountPool.count_ready
-    P.POOL = A.AccountPool(os.path.join(os.environ["ACCOUNTS_DIR"], "unused22b"))
+    runtime.POOL = A.AccountPool(os.path.join(os.environ["ACCOUNTS_DIR"], "unused22b"))
     try:
         A.AccountPool.count_ready = \
             lambda self, realm=None, model=None: (1 if realm == "cn" else 0)
         check("pick_serving_realm falls back when the preferred realm is unusable",
-              P.pick_serving_realm(["intl", "cn"], model="Qwen3.8-Flash") == "cn"
-              and P.pick_serving_realm(["cn", "intl"], model="Qwen3.8-Flash") == "cn")
+              realm_mod.pick_serving_realm(["intl", "cn"], model="Qwen3.8-Flash") == "cn"
+              and realm_mod.pick_serving_realm(["cn", "intl"], model="Qwen3.8-Flash") == "cn")
         A.AccountPool.count_ready = lambda self, realm=None, model=None: 0
         check("pick_serving_realm keeps the first candidate when none are usable",
-              P.pick_serving_realm(["intl", "cn"], model="x") == "intl")
+              realm_mod.pick_serving_realm(["intl", "cn"], model="x") == "intl")
     finally:
         A.AccountPool.count_ready = _orig_count_ready22
-        P.POOL = _orig_pool22
+        runtime.POOL = _orig_pool22
 finally:
-    P.ACCOUNTS_DIR, P.REALM_STATE_FILE = _orig_accounts_dir22, _orig_state_file22
-    P.REALM_MODE, P.REALM_PREFERRED, P.CURRENT_REALM = _orig_mode22
+    runtime.ACCOUNTS_DIR, runtime.REALM_STATE_FILE = _orig_accounts_dir22, _orig_state_file22
+    runtime.REALM_MODE, runtime.REALM_PREFERRED, runtime.CURRENT_REALM = _orig_mode22
     import shutil as _sh22
     _sh22.rmtree(_TD22, ignore_errors=True)
 
@@ -2166,7 +2185,7 @@ class _LeaseResp(object):
 _lease_resp = _LeaseResp()
 _orig_urlopen23 = qoder_net.urlopen
 qoder_net.urlopen = lambda req, timeout=None: _lease_resp
-_orig_pool23 = P.POOL
+_orig_pool23 = runtime.POOL
 import tempfile as _tf23
 _TD23 = _tf23.mkdtemp(prefix="qdlease_")
 _pool23 = A.AccountPool(_TD23)
@@ -2174,9 +2193,9 @@ _pool23.accounts = [A.Account({"uid": "lease-1", "realm": "cn",
                                "accessToken": "dt-test",
                                "refreshToken": "drt-test",
                                "expiresAt": 9999999999})]
-P.POOL = _pool23
+runtime.POOL = _pool23
 try:
-    _resp23, _acc23, _ = P.open_upstream(
+    _resp23, _acc23, _ = upstream.open_upstream(
         {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
          "stream": False}, target_realm="cn")
     check("lease: in-flight +1 while the response is open",
@@ -2185,7 +2204,7 @@ try:
         pass
     check("lease: with-exit releases the in-flight slot",
           _acc23.in_flight == 0, _acc23.in_flight)
-    _resp23c, _acc23c, _ = P.open_upstream(
+    _resp23c, _acc23c, _ = upstream.open_upstream(
         {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
          "stream": False}, target_realm="cn")
     _resp23c.close()
@@ -2194,7 +2213,7 @@ try:
           _acc23c.in_flight == 0, _acc23c.in_flight)
 finally:
     qoder_net.urlopen = _orig_urlopen23
-    P.POOL = _orig_pool23
+    runtime.POOL = _orig_pool23
     import shutil as _sh23
     _sh23.rmtree(_TD23, ignore_errors=True)
 
@@ -2204,7 +2223,7 @@ print("[24] api-key exit binding vs. gateway mode (/v1/models union)")
 # 并集合并：按上游 key 去重、先出现的区域优先；共享模型标注 both + realms
 _part_i = [("shared", {"name": "Shared (Intl)"}), ("intlonly", {"name": "Intl Only"})]
 _part_c = [("shared", {"name": "Shared (Cn)"}), ("cnonly", {"name": "Cn Only"})]
-_union = P.union_model_entries([("intl", _part_i), ("cn", _part_c)])
+_union = models.union_model_entries([("intl", _part_i), ("cn", _part_c)])
 _umap = dict(_union)
 check("union keeps first-seen order and drops duplicates",
       [m for m, _ in _union] == ["shared", "intlonly", "cnonly"],
@@ -2217,24 +2236,24 @@ check("realm-exclusive entries keep their own realm",
       and _umap["cnonly"]["realm"] == "cn")
 check("per-realm entries are not mutated (fetch_models cache stays clean)",
       "realm" not in _part_i[0][1] and "realms" not in _part_c[0][1])
-_me_u = P.model_entry("shared", _umap["shared"])
+_me_u = model_entry.model_entry("shared", _umap["shared"])
 check("model_entry surfaces realm/realms passthrough",
       _me_u.get("realm") == "both" and _me_u.get("realms") == ["intl", "cn"])
 
 # fetch_models("both") 端到端：假的按区目录，不碰网络
-_orig_cache24 = dict(P._models_cache)
-_orig_dyn24 = P.read_dynamic_models
-_orig_local24 = P.read_local_models
-_orig_mode24 = (P.REALM_MODE, P.REALM_PREFERRED)
-P.read_dynamic_models = lambda realm=None: []
-P.read_local_models = lambda realm=None: (
+_orig_cache24 = dict(models._models_cache)
+_orig_dyn24 = models.read_dynamic_models
+_orig_local24 = models.read_local_models
+_orig_mode24 = (runtime.REALM_MODE, runtime.REALM_PREFERRED)
+models.read_dynamic_models = lambda realm=None: []
+models.read_local_models = lambda realm=None: (
     [("shared", {"name": "Shared"}), ("intlonly", {"name": "Intl Only"})]
     if realm == "intl" else
     [("shared", {"name": "Shared"}), ("cnonly", {"name": "Cn Only"})])
 try:
-    P._models_cache.clear()
-    P.REALM_MODE, P.REALM_PREFERRED = "both", "intl"
-    _got24 = P.fetch_models(realm="both")
+    models._models_cache.clear()
+    runtime.REALM_MODE, runtime.REALM_PREFERRED = "both", "intl"
+    _got24 = models.fetch_models(realm="both")
     _gmap24 = dict(_got24)
     check("fetch_models('both') merges both realm catalogs once",
           sorted(_gmap24) == ["cnonly", "intlonly", "shared"], sorted(_gmap24))
@@ -2242,23 +2261,23 @@ try:
           _gmap24["shared"].get("realms") == ["intl", "cn"]
           and _gmap24["cnonly"].get("realm") == "cn")
 finally:
-    P.read_dynamic_models = _orig_dyn24
-    P.read_local_models = _orig_local24
-    P.REALM_MODE, P.REALM_PREFERRED = _orig_mode24
-    P._models_cache.clear()
-    P._models_cache.update(_orig_cache24)
+    models.read_dynamic_models = _orig_dyn24
+    models.read_local_models = _orig_local24
+    runtime.REALM_MODE, runtime.REALM_PREFERRED = _orig_mode24
+    models._models_cache.clear()
+    models._models_cache.update(_orig_cache24)
 
 print()
 print("[25] model library: context windows + thinking per official protocol")
 
 # 预算 -> 档位（官方 CLI JX() 阈值）
-_jx = [("none", P.effort_from_budget(0)), ("low", P.effort_from_budget(1024)),
-       ("medium", P.effort_from_budget(8192)), ("high", P.effort_from_budget(24576)),
-       ("xhigh", P.effort_from_budget(49152)), ("max", P.effort_from_budget(49153))]
+_jx = [("none", reasoning.effort_from_budget(0)), ("low", reasoning.effort_from_budget(1024)),
+       ("medium", reasoning.effort_from_budget(8192)), ("high", reasoning.effort_from_budget(24576)),
+       ("xhigh", reasoning.effort_from_budget(49152)), ("max", reasoning.effort_from_budget(49153))]
 check("thinking budget -> effort follows official thresholds",
       all(got == want for want, got in _jx), _jx)
 check("non-numeric budget is rejected",
-      P.effort_from_budget("big") == "" and P.effort_from_budget(None) == "")
+      reasoning.effort_from_budget("big") == "" and reasoning.effort_from_budget(None) == "")
 
 # 可选窗口：context_config 优先，缺失时按 [128K, 200K, max] 推导（官方 WX）
 _meta_cfg = {"context_config": {"200K": {"token_count": 200000, "is_default": True},
@@ -2266,43 +2285,43 @@ _meta_cfg = {"context_config": {"200K": {"token_count": 200000, "is_default": Tr
                                 "1M": {"token_count": 1000000}},
              "max_input_tokens": 180000}
 check("windows come from context_config",
-      P.available_context_windows(_meta_cfg) == [200000, 400000, 1000000])
+      reasoning.available_context_windows(_meta_cfg) == [200000, 400000, 1000000])
 check("a model without a window table declares none",
-      P.available_context_windows({"max_input_tokens": 300000}) == [])
+      reasoning.available_context_windows({"max_input_tokens": 300000}) == [])
 check("display options derived from max_input_tokens (official WX)",
-      P.window_choices({"max_input_tokens": 300000})
+      reasoning.window_choices({"max_input_tokens": 300000})
       == [128000, 200000, 300000])
 check("single-window model only offers its own window",
-      P.window_choices({"max_input_tokens": 100000}) == [100000])
+      reasoning.window_choices({"max_input_tokens": 100000}) == [100000])
 check("jX validation: listed only (or <= max without a list)",
-      P.window_supported(_meta_cfg, 400000)
-      and not P.window_supported(_meta_cfg, 300000)
-      and P.window_supported({"max_input_tokens": 100000}, 90000)
-      and not P.window_supported({"max_input_tokens": 100000}, 200000))
-_v25, _n25 = P.resolve_context_window(_meta_cfg, "1M")
+      reasoning.window_supported(_meta_cfg, 400000)
+      and not reasoning.window_supported(_meta_cfg, 300000)
+      and reasoning.window_supported({"max_input_tokens": 100000}, 90000)
+      and not reasoning.window_supported({"max_input_tokens": 100000}, 200000))
+_v25, _n25 = reasoning.resolve_context_window(_meta_cfg, "1M")
 check("window labels resolve to token counts", _v25 == 1000000, _v25)
-_v25b, _n25b = P.resolve_context_window(_meta_cfg, 300000)
+_v25b, _n25b = reasoning.resolve_context_window(_meta_cfg, 300000)
 check("unsupported window rounds to the nearest supported one",
       _v25b == 400000 and _n25b, _n25b)
 check("invalid window is ignored, not sent",
-      P.resolve_context_window(_meta_cfg, "huge")[0] is None)
+      reasoning.resolve_context_window(_meta_cfg, "huge")[0] is None)
 check("no window requested -> nothing sent",
-      P.resolve_context_window(_meta_cfg, None) == (None, ""))
+      reasoning.resolve_context_window(_meta_cfg, None) == (None, ""))
 
 # 客户端思考意图提取：档位 / 预算 / 开关
 check("reasoning_effort passthrough",
-      P.client_thinking({"reasoning_effort": "HIGH"})["effort"] == "high")
+      reasoning.client_thinking({"reasoning_effort": "HIGH"})["effort"] == "high")
 check("Anthropic-style thinking budget",
-      P.client_thinking({"thinking": {"type": "enabled",
+      reasoning.client_thinking({"thinking": {"type": "enabled",
                                        "budget_tokens": 6000}})["budget"] == 6000)
 check("enable_thinking / type=disabled both mean off",
-      P.client_thinking({"enable_thinking": False})["disable"] is True
-      and P.client_thinking({"thinking": {"type": "disabled"}})["disable"] is True)
+      reasoning.client_thinking({"enable_thinking": False})["disable"] is True
+      and reasoning.client_thinking({"thinking": {"type": "disabled"}})["disable"] is True)
 check("thinking_budget alias read",
-      P.client_thinking({"thinking_budget": 20000})["budget"] == 20000)
+      reasoning.client_thinking({"thinking_budget": 20000})["budget"] == 20000)
 
 # 请求体：档位+开关+预算随 effort 下发，窗口以 context_length 下发
-_th_body = P.build_qoder_body({
+_th_body = body_mod.build_qoder_body({
     "model": "qmodel_38max",
     "messages": [{"role": "user", "content": "hi"}],
     "thinking": {"type": "enabled", "budget_tokens": 6000},
@@ -2313,7 +2332,7 @@ check("budget 6000 -> medium on qmodel_38max",
 check("official enable_thinking + budget fields mirror the choice",
       _thp.get("enable_thinking") is True
       and _thp.get("reasoning_budget_tokens") == 6000, _thp)
-_off_body = P.build_qoder_body({
+_off_body = body_mod.build_qoder_body({
     "model": "qmodel_38max",
     "messages": [{"role": "user", "content": "hi"}],
     "enable_thinking": False,
@@ -2323,7 +2342,7 @@ check("explicit disable sends reasoning_effort=none + enable_thinking=false",
       and _off_body["parameters"].get("enable_thinking") is False)
 check("thinking off flips model_config.is_reasoning",
       _off_body["model_config"].get("is_reasoning") is False)
-_win_body = P.build_qoder_body({
+_win_body = body_mod.build_qoder_body({
     "model": "qmodel_38max",
     "messages": [{"role": "user", "content": "hi"}],
     "context_window": 400000,
@@ -2331,7 +2350,7 @@ _win_body = P.build_qoder_body({
 check("valid window choice goes out as parameters.context_length",
       _win_body["parameters"].get("context_length") == 400000,
       _win_body["parameters"])
-_win_off = P.build_qoder_body({
+_win_off = body_mod.build_qoder_body({
     "model": "qmodel_38max",
     "messages": [{"role": "user", "content": "hi"}],
     "context_window": 300000,
@@ -2341,7 +2360,7 @@ check("unsupported window rounds, still uses an official window",
       _win_off["parameters"])
 
 # 看板每模型默认：客户端没带时生效，带了以客户端为准
-_orig_dir25b = P.ACCOUNTS_DIR
+_orig_dir25b = runtime.ACCOUNTS_DIR
 _orig_state25 = os.path.join(os.environ["ACCOUNTS_DIR"], "settings.json")
 import shutil as _sh25
 if os.path.isfile(_orig_state25):
@@ -2350,12 +2369,12 @@ if os.path.isfile(_orig_state25):
 else:
     _backup25 = None
 try:
-    P.qoder_settings.set_model_override(P.ACCOUNTS_DIR, "cn:qmodel_38max",
+    qoder_settings.set_model_override(runtime.ACCOUNTS_DIR, "cn:qmodel_38max",
                                         context_window=400000, effort="low")
     check("override stored in settings",
-          P.qoder_settings.model_overrides(P.ACCOUNTS_DIR)
+          qoder_settings.model_overrides(runtime.ACCOUNTS_DIR)
           .get("cn:qmodel_38max") == {"context_window": 400000, "effort": "low"})
-    _ov_body = P.build_qoder_body({
+    _ov_body = body_mod.build_qoder_body({
         "model": "qmodel_38max",
         "messages": [{"role": "user", "content": "hi"}],
     }, None, "qmodel_38max", realm="cn")
@@ -2363,7 +2382,7 @@ try:
           _ov_body["parameters"].get("context_length") == 400000
           and _ov_body["parameters"].get("reasoning_effort") == "low",
           _ov_body["parameters"])
-    _ov_win = P.build_qoder_body({
+    _ov_win = body_mod.build_qoder_body({
         "model": "qmodel_38max",
         "messages": [{"role": "user", "content": "hi"}],
         "reasoning_effort": "xhigh",
@@ -2372,22 +2391,22 @@ try:
           _ov_win["parameters"].get("reasoning_effort") == "xhigh",
           _ov_win["parameters"])
 finally:
-    P.qoder_settings.set_model_override(P.ACCOUNTS_DIR, "cn:qmodel_38max",
+    qoder_settings.set_model_override(runtime.ACCOUNTS_DIR, "cn:qmodel_38max",
                                         context_window=0, effort="")
     if _backup25:
         _sh25.move(_backup25, _orig_state25)
-    P.ACCOUNTS_DIR = _orig_dir25b
-check("override removed again", not P.qoder_settings.model_overrides(
-    P.ACCOUNTS_DIR).get("cn:qmodel_38max"))
+    runtime.ACCOUNTS_DIR = _orig_dir25b
+check("override removed again", not qoder_settings.model_overrides(
+    runtime.ACCOUNTS_DIR).get("cn:qmodel_38max"))
 
 print()
 print("[26] /settings/save model_overrides patch contract")
 import tempfile as _tf26
 _TD26 = _tf26.mkdtemp(prefix="qdov_")
-_orig_dir26 = P.ACCOUNTS_DIR
-P.ACCOUNTS_DIR = _TD26
+_orig_dir26 = runtime.ACCOUNTS_DIR
+runtime.ACCOUNTS_DIR = _TD26
 try:
-    _h26 = P.Handler.__new__(P.Handler)
+    _h26 = Handler.__new__(Handler)
     _cap26 = {}
     _h26._payload_or_error = lambda: {"model_overrides": {
         "cn:qfmodel": {"context_window": "200000", "effort": "low"},
@@ -2410,7 +2429,7 @@ try:
     check("non-object patch is rejected with 400",
           _cap26.get("err") == 400, _cap26)
 finally:
-    P.ACCOUNTS_DIR = _orig_dir26
+    runtime.ACCOUNTS_DIR = _orig_dir26
     import shutil as _sh26
     _sh26.rmtree(_TD26, ignore_errors=True)
 
@@ -2515,7 +2534,7 @@ check("empty campaign list hints at the common causes (定向/VM/资格)",
       _row_n["description"])
 
 # ---- 虚拟化状态（中文） ----
-import qoder_fingerprint as _F27
+import qoder2api.fingerprint as _F27
 check("vm level mapping thresholds",
       [_F27._vm_level_cn(v) for v in (0, 30, 55, 77, None)]
       == ["无", "低", "中", "高", "未知"],
@@ -2542,15 +2561,15 @@ finally:
     _F27._local_vm_evidence = _orig_ev27
 
 check("diag/update routes require the panel session",
-      P.Handler._is_panel_route("/diag/vm")
-      and P.Handler._is_panel_route("/update/check"))
+      Handler._is_panel_route("/diag/vm")
+      and Handler._is_panel_route("/update/check"))
 
 # ---- 版本比较 + 更新检查三态 ----
 check("version tuple tolerates prefixes and odd shapes",
-      P.version_tuple("v1.2.3") == (1, 2, 3)
-      and P.version_tuple("1.10.0") > P.version_tuple("1.9.9")
-      and P.version_tuple("") == (0, 0, 0),
-      (P.version_tuple("v1.2.3"), P.version_tuple("1.10.0")))
+      update.version_tuple("v1.2.3") == (1, 2, 3)
+      and update.version_tuple("1.10.0") > update.version_tuple("1.9.9")
+      and update.version_tuple("") == (0, 0, 0),
+      (update.version_tuple("v1.2.3"), update.version_tuple("1.10.0")))
 
 
 class _FakeUpdateResp(object):
@@ -2568,39 +2587,39 @@ class _FakeUpdateResp(object):
 
 
 _orig_urlopen27 = qoder_net.urlopen
-_orig_upd_cache27 = dict(P._update_cache)
+_orig_upd_cache27 = dict(update._update_cache)
 try:
-    P._update_cache.update({"at": 0.0, "data": None})
+    update._update_cache.update({"at": 0.0, "data": None})
     qoder_net.urlopen = lambda req, timeout=None: _FakeUpdateResp(
         json.dumps({"tag_name": "v99.0.0", "html_url": "https://x/y",
                     "published_at": "", "name": "n"}).encode())
-    _upd = P.check_for_update(force=True)
+    _upd = update.check_for_update(force=True)
     check("update check: newer tag -> has_update with link",
           _upd["ok"] and _upd["has_update"] and _upd["latest"] == "v99.0.0"
           and _upd["url"] == "https://x/y", _upd)
     qoder_net.urlopen = lambda req, timeout=None: _FakeUpdateResp(
         json.dumps({"tag_name": "v0.0.1"}).encode())
-    _upd2 = P.check_for_update(force=True)
+    _upd2 = update.check_for_update(force=True)
     check("update check: older tag -> no update, no false alarm",
           _upd2["ok"] and not _upd2["has_update"], _upd2)
 
     def _raise_404(req, timeout=None):
         raise _ue2.HTTPError(getattr(req, "full_url", "u"), 404, "nf", {}, None)
     qoder_net.urlopen = _raise_404
-    _upd3 = P.check_for_update(force=True)
+    _upd3 = update.check_for_update(force=True)
     check("update check: 404 (no releases yet) is not treated as an error",
           _upd3["ok"] and _upd3["no_releases"] and not _upd3["has_update"], _upd3)
 
     def _raise_net(req, timeout=None):
         raise OSError("network down")
     qoder_net.urlopen = _raise_net
-    _upd4 = P.check_for_update(force=True)
+    _upd4 = update.check_for_update(force=True)
     check("update check: network failure -> ok False (shows 检查失败, not fake update)",
           _upd4["ok"] is False and not _upd4["has_update"]
           and _upd4["error"], _upd4)
 finally:
     qoder_net.urlopen = _orig_urlopen27
-    P._update_cache.update(_orig_upd_cache27)
+    update._update_cache.update(_orig_upd_cache27)
 
 # ---- /tasks 面板短缓存（命中 + 失效） ----
 T.invalidate_panel_cache()
@@ -2684,7 +2703,7 @@ try:
           _cands_c)
     check("candidates: no duplicates", len(set(_cands_i)) == len(_cands_i))
 
-    _real28 = os.path.abspath("README.md")     # any existing file works as the "exe"
+    _real28 = os.path.join(_ROOT, "README.md")   # any existing file works as the "exe"
     os.environ["QD_NATIVE_IDENTITY"] = "1"
     A._native_exe_cache.clear()
     A._realm_runtime_info_paths = \
@@ -2793,10 +2812,10 @@ try:
           and A._pinned_machine_identity() is None)
 
     # 看板保存接口：dict 保存 / null 清除 / 非法输入 400
-    _orig_dir29 = P.ACCOUNTS_DIR
-    P.ACCOUNTS_DIR = _TD29
+    _orig_dir29 = runtime.ACCOUNTS_DIR
+    runtime.ACCOUNTS_DIR = _TD29
     try:
-        _h29 = P.Handler.__new__(P.Handler)
+        _h29 = Handler.__new__(Handler)
         _cap29 = {}
         _h29._payload_or_error = lambda: {"machine_identity": {
             "machineToken": "via-panel-token", "machineType": "t",
@@ -2821,9 +2840,9 @@ try:
         check("non-object identity is rejected with 400",
               _cap29.get("err") == 400, _cap29)
     finally:
-        P.ACCOUNTS_DIR = _orig_dir29
+        runtime.ACCOUNTS_DIR = _orig_dir29
     check("/identity/export is a panel route",
-          P.Handler._is_panel_route("/identity/export"))
+          Handler._is_panel_route("/identity/export"))
 
     # ---- 过期额度快照自动刷新（/tasks 批量视图） ----
     T.invalidate_panel_cache()
@@ -3323,34 +3342,34 @@ class _Acc31(object):
         self.saved += 1
 
 
-_orig_pool31 = P.POOL
-_orig_accounts_dir31 = getattr(P, "ACCOUNTS_DIR", None)
+_orig_pool31 = runtime.POOL
+_orig_accounts_dir31 = getattr(runtime, "ACCOUNTS_DIR", None)
 _acc31 = _Acc31()
-P.POOL = _Pool31()
-P.ACCOUNTS_DIR = os.environ["ACCOUNTS_DIR"]
+runtime.POOL = _Pool31()
+runtime.ACCOUNTS_DIR = os.environ["ACCOUNTS_DIR"]
 try:
-    P._handle_envelope_account_cooldown(
+    upstream._handle_envelope_account_cooldown(
         _acc31,
-        P.UpstreamStatus(403, '{"code":"10605","message":'
+        errors.UpstreamStatus(403, '{"code":"10605","message":'
                               '"{\\"isQueued\\":true,\\"retryAfterSeconds\\": 30}"}'),
         model="qfmodel", session_key="sk-pr7")
     _n1_31 = _acc31.notes[-1]
-    P._handle_envelope_account_cooldown(_acc31, P.UpstreamStatus(403, "permission denied"),
+    upstream._handle_envelope_account_cooldown(_acc31, errors.UpstreamStatus(403, "permission denied"),
                                         model="qfmodel", session_key="sk-pr7")
     _n2_31 = _acc31.notes[-1]
-    P._handle_envelope_account_cooldown(_acc31, P.UpstreamStatus(429, "rate limit"),
+    upstream._handle_envelope_account_cooldown(_acc31, errors.UpstreamStatus(429, "rate limit"),
                                         model="qfmodel", session_key="sk-pr7")
     _n3_31 = _acc31.notes[-1]
     _acc31.enabled = True
-    P._handle_envelope_account_cooldown(
-        _acc31, P.UpstreamStatus(401, "TOKEN_EXPIRE session dead"),
+    upstream._handle_envelope_account_cooldown(
+        _acc31, errors.UpstreamStatus(401, "TOKEN_EXPIRE session dead"),
         model=None, session_key="sk-pr7")
     _n4_31 = _acc31.notes[-1]
-    _aff31_calls = list(P.POOL.affinity.calls)
+    _aff31_calls = list(runtime.POOL.affinity.calls)
 finally:
-    P.POOL = _orig_pool31
+    runtime.POOL = _orig_pool31
     if _orig_accounts_dir31 is not None:
-        P.ACCOUNTS_DIR = _orig_accounts_dir31
+        runtime.ACCOUNTS_DIR = _orig_accounts_dir31
 check("envelope 10605 queue-full -> model cooldown 30s (upstream retryAfterSeconds) + unbind",
       _n1_31["cooldown"] == 30 and _n1_31["model"] == "qfmodel"
       and set(_aff31_calls) == {"sk-pr7"}, (_n1_31, _aff31_calls))
@@ -3365,13 +3384,12 @@ for _st31, _d31, _want31 in ((403, "10605", True), (401, "x", True), (429, "x", 
                              (418, "DataInspectionFailed", False),
                              (400, "invalid_parameter_error", False),
                              (500, "x", True)):
-    _got31 = P.should_retry_envelope(P.UpstreamStatus(_st31, _d31), False, 0)
+    _got31 = upstream.should_retry_envelope(errors.UpstreamStatus(_st31, _d31), False, 0)
     check("envelope reopen before first byte: %s -> %s" % (_st31, _want31),
           _got31 is _want31, (_st31, _got31))
 check("envelope reopen still refused after bytes were emitted",
-      P.should_retry_envelope(P.UpstreamStatus(403, "10605"), True, 0) is False)
-_src31 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "qoder_proxy.py"), encoding="utf-8").read()
+      upstream.should_retry_envelope(errors.UpstreamStatus(403, "10605"), True, 0) is False)
+_src31 = _ALL_SRC
 check("all envelope capture points wire the account cooldown (>=4 occurrences)",
       _src31.count("_handle_envelope_account_cooldown(") >= 4,
       _src31.count("_handle_envelope_account_cooldown("))
@@ -3405,14 +3423,12 @@ check("run_checkin(only_daily=True) restricts to Credits kinds",
       _ra31.kinds == [None] and _ra31b.kinds == [("", "CREDITS")],
       (_ra31.kinds, _ra31b.kinds))
 
-_srcp31 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "qoder_proxy.py"), encoding="utf-8").read()
+_srcp31 = _ALL_SRC
 check("/accounts/checkin runs the daily-only sweep",
       "run_checkin(account, gap=0.4, only_daily=True)" in _srcp31)
 
 # --- F) 看板接线：按钮合并 / 兑换码面板 / 聚合行展示 ---
-_dash31 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "dashboard.html"), encoding="utf-8").read()
+_dash31 = open(_DASH_PATH, encoding="utf-8").read() if os.path.isfile(_DASH_PATH) else ""
 check("buttons renamed (领取全部福利 / 仅领 Pro 福利包)",
       "领取全部福利" in _dash31 and "仅领 Pro 福利包" in _dash31
       and "一键签到领积分" not in _dash31)

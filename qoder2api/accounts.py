@@ -1,4 +1,4 @@
-"""qoder_accounts.py —— Qoder 双区域账号池、OAuth 设备授权与凭证生命周期
+"""qoder2api.accounts —— Qoder 双区域账号池、OAuth 设备授权与凭证生命周期
 
 覆盖与 WorkBuddy 网关同等完整的账号能力：
 
@@ -27,11 +27,12 @@ import urllib.request
 from pathlib import Path
 import uuid
 
-from qoder_fingerprint import (derive_id, generate_request_id,
-                               derive_machine_token, derive_machine_type,
-                               vm_status)
-import qoder_net
-import qoder_settings
+from .fingerprint import (derive_id, generate_request_id,
+                          derive_machine_token, derive_machine_type,
+                          vm_status)
+from . import net as qoder_net
+from . import settings as qoder_settings
+from . import paths
 
 # ---------------------------------------------------------------------------
 # 区域常量（逆向自官方桌面/CLI 客户端）
@@ -286,8 +287,7 @@ def runtime_info_bridge_realm(realm):
 # （accounts/settings.json 的 machine_identity，由看板「机器身份」区保存）。
 
 def _settings_accounts_dir():
-    return os.environ.get("ACCOUNTS_DIR") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "accounts")
+    return str(paths.accounts_dir())
 
 
 def _pinned_machine_identity():
@@ -997,7 +997,7 @@ class Account(object):
         if self.path and os.path.exists(os.path.dirname(self.path)):
             self.save(os.path.dirname(self.path))
         try:
-            from qoder_sign import SESSIONS
+            from .sign import SESSIONS
             SESSIONS.invalidate(self.uid)   # 旧 COSY 会话携带旧 token，必须重建
         except Exception:
             pass
@@ -2183,7 +2183,7 @@ def _make_pkce():
 def _read_chromium_os_crypt_key(app_dir):
     """Local State.os_crypt.encrypted_key -> DPAPI 解出的 32 字节 AES key。"""
     import base64 as _b64
-    from qoder_sign import dpapi_unprotect
+    from .sign import dpapi_unprotect
     p = os.path.join(app_dir, "Local State")
     with open(p, encoding="utf-8") as fh:
         state = json.load(fh)
@@ -2204,7 +2204,7 @@ def _roaming_app_dir(cfg):
 
 def _load_app_auth(realm):
     """解出桌面 App auth.v1.dat 的明文 dict；失败抛异常。"""
-    from qoder_sign import chromium_decrypt_v10
+    from .sign import chromium_decrypt_v10
     cfg = get_realm_config(realm)
     app_dir = _roaming_app_dir(cfg)
     key = _read_chromium_os_crypt_key(app_dir)
@@ -2219,7 +2219,7 @@ def _load_app_auth(realm):
 
 def _load_cli_user(realm, path, machine_key):
     """解 CLI 端 ~/.qoder*/.auth/user（AES-128-CBC）或明文兼容形态。"""
-    from qoder_sign import aes_cbc_decrypt
+    from .sign import aes_cbc_decrypt
     with open(path, encoding="utf-8") as fh:
         raw = fh.read().strip()
     if raw.startswith("{"):

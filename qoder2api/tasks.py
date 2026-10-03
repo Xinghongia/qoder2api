@@ -1,4 +1,4 @@
-"""qoder_tasks.py —— Qoder 每日签到、额度与福利包自动化引擎
+"""qoder2api.tasks —— Qoder 每日签到、额度与福利包自动化引擎
 
 对应 WorkBuddy 网关的 wb_tasks（成长任务中心），Qoder 的“日常任务中心”是：
 
@@ -14,8 +14,8 @@ import sys
 import threading
 import time
 
-import qoder_accounts
-from qoder_accounts import get_realm_config
+from . import accounts as qoder_accounts
+from .accounts import get_realm_config
 
 _log = lambda msg: None
 
