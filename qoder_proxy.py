@@ -54,7 +54,7 @@ from qoder_accounts import (get_realm_config, gateway_candidates, CLIENT_UA,
                             runtime_info_exe)
 from pathlib import Path
 
-VERSION = "1.2.4"
+VERSION = "1.2.5"
 
 CURRENT_REALM = os.environ.get("QD_PROXY_DEFAULT_REALM", "cn")
 if CURRENT_REALM not in ("intl", "cn"):
@@ -2951,6 +2951,59 @@ def _to_int_status(status):
         return 502
 
 
+def _handle_envelope_account_cooldown(account, exc, model=None, session_key=None):
+    """信封层非 200（403 队列满/Token 被拒、429 等）冷却该账号并解绑会话，触发换号。
+
+    上游有两种投递错误的形态：urlopen 直接抛 HTTPError（open_upstream 已完整
+    处理），以及先建 HTTP200 流、把错误装进 SSE 信封 statusCodeValue（如
+    10605 队列已满）——后者此前既不冷却也不轮换，会让同一个"队列满"的账号被
+    反复选中（上游 PR#7 的场景）。这里补齐信封层语义：
+
+      - 10605/isQueued：按上游 retryAfterSeconds（缺省 30s）做**模型级**冷却；
+      - 401/403 其他：账号级冷却 60s；会话被吊销（TOKEN_EXPIRE）则 300s + 停用；
+      - 429：模型级冷却（按 retryAfterSeconds）；
+      - 其它：短冷却 15s。冷却同时解绑会话亲和，让下次选号轮换。
+    """
+    if not account or not hasattr(account, "note_error"):
+        return
+    status_int = _to_int_status(getattr(exc, "status", 502))
+    detail = getattr(exc, "detail", "") or ""
+    if session_key and POOL:
+        try:
+            POOL.affinity.unbind(session_key)
+        except Exception:
+            pass
+    total = len(POOL.accounts) if POOL else 1
+    retry_secs = 30
+    m = re.search(r"retryAfterSeconds\D+(\d+)", detail)
+    if m:
+        try:
+            retry_secs = int(m.group(1))
+        except Exception:
+            pass
+    if status_int == 429:
+        account.note_error("envelope 429", model=model, cooldown=retry_secs)
+        log("account %s throttled via envelope (429), cooling for %ds"
+            % (account.uid[:8], retry_secs), level="WARN", tag="chat")
+    elif status_int in (401, 403):
+        dead = qoder_accounts.session_dead(detail)
+        is_queue = "10605" in detail or "isQueued" in detail
+        cd = 300 if dead else (retry_secs if is_queue else 60)
+        account.note_error("envelope HTTP %s: %s" % (status_int, detail[:80]),
+                           cooldown=cd, single_account=(total <= 1),
+                           model=model if is_queue else None)
+        log("account %s rejected via envelope (HTTP %s, queue=%s), cooling for %ds"
+            % (account.uid[:8], status_int, is_queue, cd), level="WARN", tag="chat")
+        if dead:
+            account.enabled = False
+            account.save(ACCOUNTS_DIR) if account.path else None
+            log("account %s session dead via envelope (TOKEN_EXPIRE) - disabled"
+                % account.uid[:8], level="ERROR")
+    else:
+        account.note_error("envelope HTTP %s: %s" % (status_int, detail[:80]),
+                           cooldown=15, single_account=(total <= 1))
+
+
 def should_retry_envelope(exc, emitted_bytes, attempt):
     """流内错误信封是否值得**重开上游**再试。
 
@@ -2958,13 +3011,19 @@ def should_retry_envelope(exc, emitted_bytes, attempt):
     建流，provider 故障以 SSE 信封 statusCodeValue=418 投递——此时 urlopen
     层重试覆盖不到。只要 **尚未向客户端发出任何字节**、未超预算、且错误属
     瞬时类（418/5xx/provider_error，且非客户端参数错），就值得重开。
+
+    401/403/429 同样允许换号重开：它们不是"重试同一账号"的瞬时故障，而是
+    "这个账号/这条队列不行"——重开会经 open_upstream 选到别的账号（账号冷却
+    由 _handle_envelope_account_cooldown 负责）。
     """
     if emitted_bytes:
         return False
     if attempt >= TRANSIENT_MAX_RETRIES:
         return False
-    return _is_transient_upstream(_to_int_status(getattr(exc, "status", 502)),
-                                  getattr(exc, "detail", "") or "")
+    status_int = _to_int_status(getattr(exc, "status", 502))
+    if status_int in (401, 403, 429):
+        return True
+    return _is_transient_upstream(status_int, getattr(exc, "detail", "") or "")
 
 
 def aggregate_with_envelope_retry(resp, payload, session_key, realm, model,
@@ -2985,8 +3044,11 @@ def aggregate_with_envelope_retry(resp, payload, session_key, realm, model,
                 obj = aggregate_stream(cur, model, None, holder=holder)
                 return obj, account
             except UpstreamStatus as exc:
-                if attempt >= TRANSIENT_MAX_RETRIES or not _is_transient_upstream(
-                        _to_int_status(exc.status), exc.detail or ""):
+                # 信封层 403/10605、429、死会话：冷却该账号 + 解绑会话亲和
+                # （换号语义由 should_retry_envelope 放行 401/403/429 完成）
+                _handle_envelope_account_cooldown(account, exc, model=model,
+                                                  session_key=session_key)
+                if not should_retry_envelope(exc, False, attempt):
                     raise
                 log("in-stream envelope status %s on model '%s' "
                     "(try %d/%d), reopening upstream"
@@ -5238,6 +5300,9 @@ class Handler(BaseHTTPRequestHandler):
                                     "preferred": REALM_PREFERRED,
                                     "persisted": True})
         if path == "/accounts/checkin":
+            # 账号面板的「每日签到」按钮：**只做每日签到领积分**——Credits 类活动
+            # （如"每天领 100 Credits"，旧 sash 接口兜底），不领券/兑换码类活动，
+            # 也不领 Pro 福利包（那些走签到与福利中心的按钮）。
             import qoder_tasks
             uid = payload.get("uid")
             targets = [POOL.get(uid)] if uid else list(POOL.accounts)
@@ -5247,15 +5312,21 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if not account.enabled or not account.access_token:
                     continue
-                # 能力运行时探测（不再"仅国内版"）：接口不存在时返回明确原因
-                res = account.checkin()
+                res = qoder_tasks.run_checkin(account, gap=0.4, only_daily=True)
                 # 签到后顺手刷新额度快照：账号行的积分列与"更新于"随点击更新
                 try:
                     account.fetch_credits()
                 except Exception:
                     pass
-                results.append({"uid": account.uid,
-                                "nickname": account.nickname, **res})
+                results.append({
+                    "uid": account.uid,
+                    "nickname": account.nickname,
+                    "ok": bool(res.get("ok")),
+                    "earned_credit": res.get("earned_credit") or 0,
+                    "msg": (res.get("logs") or [""])[-1],
+                    "logs": res.get("logs") or [],
+                    "credits": res.get("credits"),
+                })
             qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
             return self._json(200, {"results": results,
                                     "accounts": account_views()})
@@ -5555,6 +5626,9 @@ class Handler(BaseHTTPRequestHandler):
                         except UpstreamStatus as exc:
                             # 控制帧（response.created 等）先于数据，不能算
                             # “已输出”；以上游数据行计数判断能否重开。
+                            _handle_envelope_account_cooldown(
+                                account, exc, model=model,
+                                session_key=session_key)
                             if should_retry_envelope(exc, False, attempts) \
                                     and consumed.get("n", 0) == 0:
                                 attempts += 1
@@ -5747,6 +5821,9 @@ class Handler(BaseHTTPRequestHandler):
                                          fp=fp, account=account.uid)
                             return
                         except UpstreamStatus as exc:
+                            _handle_envelope_account_cooldown(
+                                account, exc, model=model,
+                                session_key=session_key)
                             if should_retry_envelope(exc, emitted, attempts):
                                 attempts += 1
                                 log("chat in-stream envelope status %s on "

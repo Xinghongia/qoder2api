@@ -412,14 +412,14 @@ a:hover{text-decoration:underline}
         <select id="growthAcctSelect" onchange="switchGrowthAccount(this.value)" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg);font-family:inherit">
           <option value="all">全部账号 (批量)</option>
         </select>
-        <button class="primary" id="btnRunTasks" onclick="runGrowthTasks(this)">一键签到领积分</button>
-        <button id="btnCatTravel" onclick="triggerCatTravel(this)">领取福利包</button>
+        <button class="primary" id="btnRunTasks" onclick="runGrowthTasks(this)">领取全部福利</button>
+        <button id="btnCatTravel" onclick="triggerCatTravel(this)">仅领 Pro 福利包</button>
       </div>
     </div>
 
     <div class="cards" style="margin-bottom:14px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-      <div class="card"><div class="val" id="stkDays">-</div><div class="lbl">连续签到天数</div></div>
-      <div class="card accent"><div class="val" id="nrgBalance">-</div><div class="lbl">积分额度余额</div></div>
+      <div class="card"><div class="val" id="stkDays">-</div><div class="lbl" id="stkLabel">连续签到天数</div></div>
+      <div class="card accent"><div class="val" id="nrgBalance">-</div><div class="lbl" id="nrgLabel">积分额度余额</div></div>
       <div class="card accent2"><div class="val" id="catState">-</div><div class="lbl" id="catDesc">Pro 福利包状态</div></div>
       <div class="card" id="cardVmState" title="官方客户端按设备风控身份下发活动；本机虚拟化环境会被计入风险画像">
         <div class="val" id="vmState" style="font-size:16px">-</div>
@@ -442,6 +442,22 @@ a:hover{text-decoration:underline}
         </thead>
         <tbody></tbody>
       </table>
+    </div>
+
+    <div id="codesPanel" style="display:none;margin-top:14px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px">已领取的兑换码 / 券（按账号）</div>
+      <div class="table-wrap"><table id="codesTable">
+        <thead><tr>
+          <th style="width:190px">账号</th>
+          <th style="width:190px">活动</th>
+          <th>兑换码</th>
+          <th style="width:170px">操作</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div style="font-size:11px;color:var(--dim);margin-top:6px">
+        兑换码仅保存在本机账号文件里；「活动页/二维码」打开官方活动页可用同一账号查看二维码。
+      </div>
     </div>
 
     <div id="taskLogBox" style="display:none;margin-top:14px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12px;font-family:ui-monospace,monospace;line-height:1.6;max-height:220px;overflow-y:auto"></div>
@@ -1375,6 +1391,46 @@ function refreshVmState(btn){
   });
 }
 
+// 兑换码/券面板：逐账号展示（账号 · 活动 · 兑换码 · 复制/活动页）
+function renderCodePanel(summary){
+  const box = document.getElementById('codesPanel');
+  const tb = document.querySelector('#codesTable tbody');
+  if(!box || !tb) return;
+  const codes = (summary && summary.codes) || [];
+  if(!codes.length){ box.style.display = 'none'; tb.innerHTML = ''; return; }
+  box.style.display = 'block';
+  tb.innerHTML = codes.map(c =>
+      '<tr><td>' + esc(c.nickname || '') +
+        (c.account ? ('<br><span class="mono" style="font-size:11px;color:var(--dim)">' +
+          esc(String(c.account).slice(0, 8)) + ' · ' +
+          (c.realm === 'cn' ? '国内版' : '国际版') + '</span>') : '') + '</td>' +
+      '<td class="mono" style="font-size:11px">' + esc(c.campaign || c.campaign_id || '') + '</td>' +
+      '<td><span class="mono" style="font-size:13px;letter-spacing:.5px">' + esc(c.code) + '</span></td>' +
+      '<td><button class="sec" style="font-size:11px;padding:3px 8px" data-copy="' + esc(c.code) + '">复制</button>' +
+        (c.url ? (' <a class="sec" style="font-size:11px;padding:3px 8px;display:inline-block" href="' +
+                  esc(c.url) + '" target="_blank" rel="noopener">活动页/二维码</a>') : '') +
+      '</td></tr>').join('');
+  tb.querySelectorAll('button[data-copy]').forEach(b => {
+    b.onclick = () => copyText(b.getAttribute('data-copy'), b);
+  });
+}
+
+function copyText(text, btn){
+  const done = () => { if(btn){ const t = btn.textContent; btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = t; }, 1500); } };
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta); done();
+    } catch(e) { /* 复制失败：用户可手动选中 */ }
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else { fallback(); }
+}
+
 async function loadGrowthTasks(){
   const sec = document.getElementById("sectionGrowthTasks");
   if(!sec) return;
@@ -1401,6 +1457,13 @@ async function loadGrowthTasks(){
 
     const elStk = document.getElementById("stkDays");
     if(elStk) elStk.textContent = streak + ' 天';
+    // 全部账号（批量）视图：卡片改成合计口径，活动行已按活动聚合并标注每账号资格
+    const isAll = (sum.mode === 'all');
+    const lblStk = document.getElementById("stkLabel");
+    const lblNrg = document.getElementById("nrgLabel");
+    if(lblStk) lblStk.textContent = isAll ? '连续签到（批量视图）' : '连续签到天数';
+    if(lblNrg) lblNrg.textContent = isAll ? '合计积分余额（全部账号）' : '积分额度余额';
+    renderCodePanel(sum);
     const elNrg = document.getElementById("nrgBalance");
     if(elNrg){
       elNrg.textContent = energy;
@@ -1425,7 +1488,7 @@ async function loadGrowthTasks(){
         if(elCatDesc) elCatDesc.textContent = '稍后再来查看';
       } else {
         elCat.textContent = '待确认';
-        if(elCatDesc) elCatDesc.textContent = '点击「领取福利包」检查资格';
+        if(elCatDesc) elCatDesc.textContent = '点击「仅领 Pro 福利包」检查资格';
       }
     }
 
@@ -1446,9 +1509,14 @@ async function loadGrowthTasks(){
       } else if(t.status === 'not_accepted'){
         stBadge = '<span class="badge">未接取</span>';
       }
-      const prog = (t.status === 'claimed' || t.status === 'completed') ? '已达成' : (t.current + ' / ' + t.target);
-      const rwd = (t.reward_credit ? ('<b style="color:var(--accent2)">+' + t.reward_credit + '</b> 积分') : '') +
-                  (t.reward_energy ? (' <span style="color:var(--accent)">+' + t.reward_energy + ' 能量</span>') : '');
+      const prog = t.accounts_by_state ? '多账号'
+                 : ((t.status === 'claimed' || t.status === 'completed') ? '已达成'
+                    : (t.current + ' / ' + t.target));
+      // 券/兑换码类活动（如奶茶免单卡）用 reward_text 展示；积分/能量走原样式
+      const rwd = t.reward_text
+        ? ('<b style="color:var(--accent2)">' + esc(t.reward_text) + '</b>')
+        : ((t.reward_credit ? ('<b style="color:var(--accent2)">+' + t.reward_credit + '</b> 积分') : '') +
+           (t.reward_energy ? (' <span style="color:var(--accent)">+' + t.reward_energy + ' 能量</span>') : ''));
       return '<tr>'
         + '<td><b>' + esc(t.name) + '</b><br><span class="mono" style="font-size:11px;color:var(--dim)">' + esc(t.task_code) + '</span></td>'
         + '<td style="font-size:12px;color:var(--dim);max-width:300px">' + esc(t.description || '-') + '</td>'
@@ -1462,14 +1530,15 @@ async function loadGrowthTasks(){
   }
 }
 
+// 「领取全部福利」：每日签到/活动（含券类兑换码）+ Pro 福利包，一次点完（均幂等）
 async function runGrowthTasks(btn){
   btn.disabled = true;
   const oldText = btn.textContent;
-  btn.textContent = '任务执行中...';
+  btn.textContent = '领取中...';
   const logBox = document.getElementById("taskLogBox");
   if(logBox){
     logBox.style.display = 'block';
-    logBox.innerHTML = '<div style="color:var(--accent)">[checkin] 正在启动每日签到与领奖流水...</div>';
+    logBox.innerHTML = '<div style="color:var(--accent)">[福利] 正在领取全部福利（每日签到 + 限时活动 + Pro 福利包）...</div>';
   }
   try{
     const payload = {};
@@ -1477,15 +1546,22 @@ async function runGrowthTasks(btn){
       payload.uid = CURRENT_GROWTH_UID;
     }
     const r = await postJSON("/tasks/run", payload);
-    const logs = r.logs || [];
+    const logs = (r.logs || []).slice();
+    let proMsg = '';
+    try{
+      const t = await postJSON("/tasks/travel", payload);
+      if(t && t.msg) proMsg = t.msg;
+      logs.push('--- Pro 福利包 ---');
+      (t.logs || []).forEach(l => logs.push(l));
+    }catch(e2){ logs.push('Pro 福利包领取跳过: ' + (e2 && e2.message)); }
     if(logBox){
       logBox.innerHTML = logs.map(l => '<div>' + esc(l) + '</div>').join('');
       logBox.scrollTop = logBox.scrollHeight;
     }
     await loadAccounts();
     await loadGrowthTasks();
-    const sumC = r.credit_added != null ? ('，共增加 +' + r.credit_added + ' 积分') : '';
-    toast("签到流水执行完成" + sumC + "！");
+    const sumC = r.credit_added != null ? ('，活动新增 +' + r.credit_added + ' 积分') : '';
+    toast("全部福利领取完成" + sumC + (proMsg ? ('；Pro: ' + proMsg.slice(0, 60)) : '') + "！");
   }catch(e){
     if(logBox) logBox.innerHTML += '<div style="color:var(--warn)">执行出错: ' + esc(e.message) + '</div>';
     alert("任务执行失败: " + e.message);
@@ -1509,7 +1585,7 @@ async function triggerCatTravel(btn){
   }catch(e){
     toast("福利包领取失败: " + e.message, "bad");
   }finally{
-    if(btn){ btn.disabled = false; btn.textContent = '领取福利包'; }
+    if(btn){ btn.disabled = false; btn.textContent = '仅领 Pro 福利包'; }
   }
 }
 

@@ -2873,8 +2873,8 @@ try:
 
     _view29 = T.fetch_tasks_view(_Pool29())
     _sm29 = _view29.get("summary") or {}
-    check("stale snapshot refetched, fresh one kept (focus account fetched once)",
-          _cnt29 == {"a": 1, "b": 1}, _cnt29)
+    check("batch view refreshes ONLY the stale snapshot (no focus-account fetch)",
+          _cnt29 == {"a": 0, "b": 1}, _cnt29)
     check("batch balance uses the REFRESHED value",
           _sm29.get("energy") == 170, _sm29.get("energy"))
     _bd29 = {b["uid"]: b["remain"] for b in (_sm29.get("energy_breakdown") or [])}
@@ -2886,7 +2886,7 @@ try:
     T.invalidate_panel_cache()
     _view29b = T.fetch_tasks_view(_Pool29())
     check("now-fresh snapshots are not refetched again",
-          _cnt29 == {"a": 1, "b": 0}, _cnt29)
+          _cnt29 == {"a": 0, "b": 0}, _cnt29)
     check("_credits_stale matches the TTL boundary",
           T._credits_stale(_pa29) is False
           and T._credits_stale(_pb29) is False)  # b 刚刷新过，a 一直新鲜
@@ -3070,6 +3070,360 @@ _row_dv = T._campaign_task_row(
      "campaign_url": "", "identity": "derived", "campaigns": []}, {})
 check("task row: derived identity hint appended to the no-activity row",
       "机器身份" in _row_dv["description"], _row_dv["description"])
+
+print()
+print("[31] upstream v1.1.9 port: coupon codes / Chinese names / aggregate / envelope cooldown")
+
+import tempfile as _tf31
+import shutil as _sh31
+
+# --- A) 券类活动：兑换码落盘 + 领取瞬间失败码分类 + pending/locked + only_kinds ---
+_tmp31 = _tf31.mkdtemp(prefix="qd31-")
+_cp_path = os.path.join(_tmp31, "cp-1.json")
+_claim_calls31 = {"n": 0, "ids": []}
+
+
+def _camp31(cid, status="CLAIMABLE", kind="CREDITS", amount=100,
+            reason="", ach=None, key=None, title=""):
+    camp = {"campaignId": cid, "campaignKey": key or cid,
+            "actionType": "CLAIM_BENEFIT", "claimStatus": status,
+            "startAt": 0, "endAt": 0,
+            "benefit": {"kind": kind, "amount": amount},
+            "requiredAchievementKey": "sites_first_use" if kind == "REDEMPTION_CODE" else "",
+            "achievementCompleted": bool(ach),
+            "unavailableReason": reason, "placements": []}
+    if title:
+        camp["placements"] = [{"content": {"zh": {
+            "title": title, "description": "限时福利",
+            "detailUrl": "https://docs.qoder.cn/events/new-coffee"}}}]
+    return camp
+
+
+def _fake_coupon31(url, **kw):
+    if url.endswith("/campaigns"):
+        return {"uid": "cp-1", "showCampaign": True, "claimable": True,
+                "campaignUrl": "https://qoder.com.cn/activities",
+                "campaigns": [
+                    _camp31("c-credit", kind="CREDITS", amount=100,
+                            title="每天领 100 Credits"),
+                    _camp31("c-coupon", kind="REDEMPTION_CODE", amount=1,
+                            ach=True, key="act-20260928-620",
+                            title="发布 Qoder 站点，免费领取奶茶免单卡"),
+                    _camp31("c-stock", kind="REDEMPTION_CODE", amount=1, ach=True),
+                    _camp31("c-locked", status="NOT_ELIGIBLE",
+                            kind="REDEMPTION_CODE", amount=1,
+                            reason="ACHIEVEMENT_NOT_COMPLETED", ach=False),
+                ]}
+    if "/claim" in url:
+        _claim_calls31["n"] += 1
+        cid = url.rstrip("/").split("/")[-2]
+        _claim_calls31["ids"].append(cid)
+        if cid == "c-credit":
+            return {"status": "CLAIMED", "grantId": "g1",
+                    "benefit": {"kind": "CREDITS", "amount": 100}}
+        if cid == "c-coupon":
+            return {"status": "CLAIMED", "redemptionCode": "MT-8888-6666",
+                    "benefit": {"kind": "REDEMPTION_CODE", "amount": 1}}
+        if cid == "c-stock":
+            # 领取瞬间名额发完：按 pending 分类，不算失败
+            return {"status": "NOT_ELIGIBLE",
+                    "failureCode": "REDEMPTION_CODE_OUT_OF_STOCK"}
+    raise AssertionError("unexpected url: %s" % url)
+
+
+_orig_hj31 = _A.http_json
+_orig_native31 = A.native_machine_identity
+A.native_machine_identity = lambda *a, **kw: {}
+_A.http_json = _fake_coupon31
+try:
+    _acc31 = _A.Account({"uid": "cp-1", "realm": "cn", "accessToken": "dt-x"},
+                        path=_cp_path)
+    _res31 = _acc31.campaign_checkin(gap=0)
+    _names31 = [T.campaign_title(c) for c in _res31["claimed"]]
+    check("coupon campaign claimed with credits in one sweep",
+          _res31["ok"] and _res31["earned"] == 100
+          and "每天领 100 Credits" in _names31
+          and "发布 Qoder 站点，免费领取奶茶免单卡" in _names31, _res31)
+    check("redemption code captured + returned for display",
+          _res31["codes"] == [{"campaign": "发布 Qoder 站点，免费领取奶茶免单卡",
+                               "code": "MT-8888-6666"}], _res31["codes"])
+    check("claim-time out-of-stock classified as pending (not an error)",
+          bool(_res31["pending"]) and not _res31["errors"],
+          (_res31["pending"], _res31["errors"]))
+    check("achievement-gated coupon classified as locked",
+          len(_res31["locked"]) == 1
+          and _res31["locked"][0]["campaign_id"] == "c-locked", _res31["locked"])
+    check("message carries the code + round wording",
+          "兑换码" in _res31["message"] and "本轮" in _res31["message"],
+          _res31["message"])
+    _reload31 = _A.Account(json.load(open(_cp_path, encoding="utf-8")), path=_cp_path)
+    check("redemption code persisted to the account file (survives restart)",
+          _reload31.campaign_codes.get("c-coupon") == "MT-8888-6666",
+          _reload31.campaign_codes)
+
+    # only_kinds=("", "CREDITS")：账号面板「每日签到」只领积分，不碰券
+    _claim_calls31["n"] = 0
+    _claim_calls31["ids"] = []
+    _acc31b = _A.Account({"uid": "cp-1", "realm": "cn", "accessToken": "dt-x"},
+                         path=os.path.join(_tmp31, "cp-1b.json"))
+    _acc31b.campaign_checkin(gap=0, only_kinds=("", "CREDITS"))
+    check("only_daily claims Credits only (coupon untouched, 1 POST)",
+          _claim_calls31["ids"] == ["c-credit"] and not _acc31b.campaign_codes,
+          _claim_calls31)
+
+    # 同人已领取：记 6 小时冷却，冷却期内不再重复 POST
+    _blocked_calls31 = {"n": 0}
+
+    def _fake_blocked31(url, **kw):
+        if url.endswith("/campaigns"):
+            return {"uid": "bl-1", "showCampaign": True, "claimable": True,
+                    "campaignUrl": "", "campaigns": [
+                        _camp31("c-b", kind="CREDITS", amount=100)]}
+        if "/claim" in url:
+            _blocked_calls31["n"] += 1
+            return {"status": "BLOCKED",
+                    "failureCode": "SAME_PERSON_ALREADY_CLAIMED"}
+        raise AssertionError("unexpected url: %s" % url)
+
+    _A.http_json = _fake_blocked31
+    _acc31c = _A.Account({"uid": "bl-1", "realm": "cn", "accessToken": "dt-x"},
+                         path=os.path.join(_tmp31, "bl-1.json"))
+    _r31a = _acc31c.campaign_checkin(gap=0)
+    check("SAME_PERSON block recorded with 6h cooldown",
+          bool(_r31a["blocked"])
+          and _acc31c.campaign_blocked_until.get("c-b", 0) > time.time(),
+          _acc31c.campaign_blocked_until)
+    _r31b = _acc31c.campaign_checkin(gap=0)
+    check("cooldown skips the repeat POST (marked as cooldown, not failure)",
+          _blocked_calls31["n"] == 1 and _r31b["blocked"][0].get("cooldown") is True
+          and not _r31b["errors"], (_blocked_calls31, _r31b["blocked"]))
+
+    # 失败码中文表
+    check("campaign failure codes have Chinese explanations (round wording)",
+          "名额已发完" in A._CAMPAIGN_FAILURE_CN["REDEMPTION_CODE_OUT_OF_STOCK"]
+          and "新人任务" in A._CAMPAIGN_FAILURE_CN["ACHIEVEMENT_NOT_COMPLETED"])
+finally:
+    _A.http_json = _orig_hj31
+    A.native_machine_identity = _orig_native31
+    _sh31.rmtree(_tmp31, ignore_errors=True)
+
+# --- B) 活动中文名：官方 zh 优先，兜底次之，最后 key ---
+check("campaign_title prefers official zh title",
+      T.campaign_title({"title_zh": "每天领 100 Credits",
+                        "campaign_key": "act-1"}) == "每天领 100 Credits")
+check("campaign_title falls back to the built-in table (prefix match)",
+      T.campaign_title({"campaign_key": "act-20260930-057"}) == "每天领 100 Credits"
+      and T.campaign_title({"campaign_key": "act-20260928-620"}).startswith("新人任务"))
+check("campaign_title last resort = key / kind label",
+      T.campaign_title({"campaign_key": "act-unknown"}) == "act-unknown"
+      and T.campaign_title({"benefit": {"kind": "REDEMPTION_CODE"}}) == "限时活动（兑换码）")
+check("campaign_desc / campaign_link read official zh fields",
+      T.campaign_desc({"desc_zh": "限时福利"}) == "限时福利"
+      and T.campaign_link({"detail_url": "https://docs.qoder.cn/x"})
+      == "https://docs.qoder.cn/x")
+
+# --- C) 全部账号：按活动聚合 + 逐账号资格明细 + 兑换码收集 ---
+def _norm31(raw):
+    """把 http_json 的原始活动形状转成 Account.campaigns() 归一化后的形状。"""
+    placements = raw.get("placements") or []
+    cont = ((placements[0] or {}).get("content") or {}).get("zh") or {}
+    return {"title_zh": cont.get("title") or "", "title_en": "",
+            "desc_zh": cont.get("description") or "",
+            "detail_url": cont.get("detailUrl") or "", "button_text": "",
+            "campaign_id": raw["campaignId"], "campaign_key": raw["campaignKey"],
+            "action_type": raw["actionType"], "claim_status": raw["claimStatus"],
+            "start_at": 0, "end_at": raw.get("endAt") or 0,
+            "benefit": raw["benefit"],
+            "required_achievement_key": raw.get("requiredAchievementKey") or "",
+            "achievement_completed": bool(raw.get("achievementCompleted")),
+            "unavailable_reason": raw.get("unavailableReason") or "",
+            "placements": placements}
+
+
+class _AggAcct31(object):
+    def __init__(self, uid, realm, camps, codes=None):
+        self.uid = uid
+        self.nickname = "nick-" + uid
+        self.realm = realm
+        self.campaign_codes = codes or {}
+        self.campaign_status = {"campaign_url": "https://qoder.com.cn/activities"}
+        self._camps = [_norm31(c) for c in camps]
+
+    def campaigns(self, force=False):
+        return {"ok": True, "available": True, "show_campaign": True,
+                "claimable": True, "campaign_url": "", "identity": "native",
+                "campaigns": self._camps}
+
+
+_agg_a31 = _AggAcct31("aa-1", "cn", [
+    _camp31("c-credit", kind="CREDITS", amount=100, title="每天领 100 Credits"),
+    _camp31("c-coupon", status="CLAIMED", kind="REDEMPTION_CODE", amount=1,
+            ach=True, title="奶茶免单卡")],
+    codes={"c-coupon": "MT-0001"})
+_agg_b31 = _AggAcct31("bb-2", "cn", [
+    _camp31("c-credit", status="CLAIMED", kind="CREDITS", amount=100,
+            title="每天领 100 Credits")])
+_rows31, _codes31 = T.aggregate_campaign_rows([_agg_a31, _agg_b31])
+_by_name31 = {r["name"]: r for r in _rows31}
+check("aggregate rows list every account's eligibility per campaign",
+      len(_rows31) == 2
+      and "可领 1/2" in _by_name31["每天领 100 Credits"]["description"]
+      and "已领 1/2" in _by_name31["每天领 100 Credits"]["description"],
+      _by_name31.get("每天领 100 Credits"))
+check("campaign missing from an account's list = 无资格(不在定向), stated honestly",
+      "无资格(不在定向) 1/2" in _by_name31["奶茶免单卡"]["description"],
+      _by_name31.get("奶茶免单卡"))
+check("coupon row shows reward_text instead of +N credits",
+      _by_name31["奶茶免单卡"]["reward_text"] == "兑换码 ×1"
+      and _by_name31["奶茶免单卡"]["reward_credit"] == 0)
+check("aggregate collects per-account redemption codes",
+      len(_codes31) == 1 and _codes31[0]["code"] == "MT-0001"
+      and _codes31[0]["account"] == "aa-1", _codes31)
+
+# VIEW_DETAILS（无奖励的点击查看类）不冒充"可领"：它在领取路径里会被跳过
+_agg_c31 = _AggAcct31("cc-3", "cn", [
+    _camp31("c-view", kind="CREDITS", amount=0, title="首月翻倍促销")])
+_agg_c31._camps[0]["action_type"] = "VIEW_DETAILS"
+_agg_c31._camps[0]["claim_status"] = "CLAIMABLE"
+_rows31b, _ = T.aggregate_campaign_rows([_agg_c31])
+check("view-only campaign is labelled 仅查看(无奖励), not 可领",
+      _rows31b[0]["status"] == "not_accepted"
+      and "仅查看(无奖励) 1/1" in _rows31b[0]["description"],
+      _rows31b[0])
+
+# --- D) 信封层 403/10605 冷却 + 轮换（上游 PR#7） ---
+class _Aff31(object):
+    def __init__(self):
+        self.calls = []
+
+    def unbind(self, key):
+        self.calls.append(key)
+
+
+class _Pool31(object):
+    def __init__(self):
+        self.affinity = _Aff31()
+        self.accounts = [1, 2, 3]
+
+
+class _Acc31(object):
+    def __init__(self):
+        self.uid = "pr7acc12"
+        self.enabled = True
+        self.notes = []
+        self.saved = 0
+        self.path = "fake-acc.json"
+
+    def note_error(self, msg, cooldown=60, single_account=False, model=None,
+                   until=None, escalate=False):
+        self.notes.append({"msg": str(msg)[:60], "cooldown": cooldown,
+                           "model": model})
+
+    def save(self, d):
+        self.saved += 1
+
+
+_orig_pool31 = P.POOL
+_orig_accounts_dir31 = getattr(P, "ACCOUNTS_DIR", None)
+_acc31 = _Acc31()
+P.POOL = _Pool31()
+P.ACCOUNTS_DIR = os.environ["ACCOUNTS_DIR"]
+try:
+    P._handle_envelope_account_cooldown(
+        _acc31,
+        P.UpstreamStatus(403, '{"code":"10605","message":'
+                              '"{\\"isQueued\\":true,\\"retryAfterSeconds\\": 30}"}'),
+        model="qfmodel", session_key="sk-pr7")
+    _n1_31 = _acc31.notes[-1]
+    P._handle_envelope_account_cooldown(_acc31, P.UpstreamStatus(403, "permission denied"),
+                                        model="qfmodel", session_key="sk-pr7")
+    _n2_31 = _acc31.notes[-1]
+    P._handle_envelope_account_cooldown(_acc31, P.UpstreamStatus(429, "rate limit"),
+                                        model="qfmodel", session_key="sk-pr7")
+    _n3_31 = _acc31.notes[-1]
+    _acc31.enabled = True
+    P._handle_envelope_account_cooldown(
+        _acc31, P.UpstreamStatus(401, "TOKEN_EXPIRE session dead"),
+        model=None, session_key="sk-pr7")
+    _n4_31 = _acc31.notes[-1]
+    _aff31_calls = list(P.POOL.affinity.calls)
+finally:
+    P.POOL = _orig_pool31
+    if _orig_accounts_dir31 is not None:
+        P.ACCOUNTS_DIR = _orig_accounts_dir31
+check("envelope 10605 queue-full -> model cooldown 30s (upstream retryAfterSeconds) + unbind",
+      _n1_31["cooldown"] == 30 and _n1_31["model"] == "qfmodel"
+      and set(_aff31_calls) == {"sk-pr7"}, (_n1_31, _aff31_calls))
+check("envelope 403 plain -> account-level cooldown 60s",
+      _n2_31["cooldown"] == 60 and _n2_31["model"] is None, _n2_31)
+check("envelope 429 -> model-level cooldown 30s",
+      _n3_31["cooldown"] == 30 and _n3_31["model"] == "qfmodel", _n3_31)
+check("envelope dead session -> 300s + account disabled (same as HTTP path)",
+      _acc31.enabled is False and _n4_31["cooldown"] == 300 and _acc31.saved == 1,
+      (_acc31.enabled, _n4_31))
+for _st31, _d31, _want31 in ((403, "10605", True), (401, "x", True), (429, "x", True),
+                             (418, "DataInspectionFailed", False),
+                             (400, "invalid_parameter_error", False),
+                             (500, "x", True)):
+    _got31 = P.should_retry_envelope(P.UpstreamStatus(_st31, _d31), False, 0)
+    check("envelope reopen before first byte: %s -> %s" % (_st31, _want31),
+          _got31 is _want31, (_st31, _got31))
+check("envelope reopen still refused after bytes were emitted",
+      P.should_retry_envelope(P.UpstreamStatus(403, "10605"), True, 0) is False)
+_src31 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "qoder_proxy.py"), encoding="utf-8").read()
+check("all envelope capture points wire the account cooldown (>=4 occurrences)",
+      _src31.count("_handle_envelope_account_cooldown(") >= 4,
+      _src31.count("_handle_envelope_account_cooldown("))
+
+# --- E) run_checkin(only_daily) 走 only_kinds；/accounts/checkin 用它 ---
+class _RunAcct31(object):
+    uid = "ra-1"
+    nickname = "ra"
+    credits = {}
+
+    def __init__(self):
+        self.kinds = []
+
+    def campaign_checkin(self, gap=0.5, only_kinds=None):
+        self.kinds.append(only_kinds)
+        return {"ok": True, "claimed": [], "already": [], "codes": [],
+                "message": "x"}
+
+    def fetch_credits(self):
+        return {"ok": False}
+
+    def fetch_plan(self):
+        return ""
+
+
+_ra31 = _RunAcct31()
+T.run_checkin(_ra31, gap=0)
+_ra31b = _RunAcct31()
+T.run_checkin(_ra31b, gap=0, only_daily=True)
+check("run_checkin(only_daily=True) restricts to Credits kinds",
+      _ra31.kinds == [None] and _ra31b.kinds == [("", "CREDITS")],
+      (_ra31.kinds, _ra31b.kinds))
+
+_srcp31 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "qoder_proxy.py"), encoding="utf-8").read()
+check("/accounts/checkin runs the daily-only sweep",
+      "run_checkin(account, gap=0.4, only_daily=True)" in _srcp31)
+
+# --- F) 看板接线：按钮合并 / 兑换码面板 / 聚合行展示 ---
+_dash31 = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "dashboard.html"), encoding="utf-8").read()
+check("buttons renamed (领取全部福利 / 仅领 Pro 福利包)",
+      "领取全部福利" in _dash31 and "仅领 Pro 福利包" in _dash31
+      and "一键签到领积分" not in _dash31)
+check("领取全部福利 = 活动全量 + Pro 福利包（run + travel）",
+      'postJSON("/tasks/run"' in _dash31 and 'postJSON("/tasks/travel"' in _dash31)
+check("codes panel renders with copy + activity link",
+      "codesPanel" in _dash31 and "codesTable" in _dash31
+      and "data-copy" in _dash31 and "活动页/二维码" in _dash31)
+check("task rows render aggregate state + reward_text",
+      "accounts_by_state" in _dash31 and "reward_text" in _dash31
+      and "多账号" in _dash31)
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

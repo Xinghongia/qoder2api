@@ -102,6 +102,8 @@ def fetch_task_view(account):
     if plan_name:
         account.plan = plan_name
     tasks.append(_campaign_task_row(account, camp, summary))
+    # 券类/兑换码活动（非 Credits 奖励）单独成行：领取后兑换码要能展示
+    tasks.extend(_extra_campaign_rows(account, camp))
     ok, st = status_pair
     if ok:
         summary["streak_days"] = st["streak_days"]
@@ -168,6 +170,14 @@ def fetch_task_view(account):
         summary["travel"] = {"state": "idle", "daily_limit_reached": True}
 
     summary["plan"] = account.plan or summary["plan"]
+    # 本账号已领取的兑换码（券类活动）：按账号分别保存，看板/接口可直接展示
+    _by_id31 = {c["campaign_id"]: c for c in (camp.get("campaigns") or [])}
+    summary["codes"] = [
+        {"campaign": campaign_title(_by_id31.get(key)) or key, "code": code,
+         "url": camp.get("campaign_url") or ""}
+        for key, code in (getattr(account, "campaign_codes", {}) or {}).items()
+        if code
+    ]
     return tasks, summary
 
 
@@ -247,7 +257,7 @@ def _campaign_task_row(account, camp, summary):
     """把活动平台状态渲染成看板任务行（task_code=daily_checkin）。
 
     状态语义：
-      CLAIMABLE + CLAIM_BENEFIT -> "completed"（待领奖，点「一键签到」即自动领取）
+      CLAIMABLE + CLAIM_BENEFIT -> "completed"（待领奖，点「领取全部福利」即自动领取）
       全部 CLAIMED              -> "claimed"  （今日已领取）
       其它/无活动               -> "not_accepted"
     """
@@ -255,9 +265,13 @@ def _campaign_task_row(account, camp, summary):
     jump = (camp.get("campaign_url") or website + "/activities") \
         if camp.get("ok") else website + "/activities"
     items = [{"key": c["campaign_key"] or c["campaign_id"],
+              "title": campaign_title(c),
+              "desc": campaign_desc(c),
+              "detail_url": campaign_link(c),
               "id": c["campaign_id"],
               "action_type": c.get("action_type", ""),
               "claim_status": c.get("claim_status", ""),
+              "benefit_kind": str((c.get("benefit") or {}).get("kind") or "").upper(),
               "benefit_amount": (c.get("benefit") or {}).get("amount", 0),
               "required_achievement_key": c.get("required_achievement_key", ""),
               "start_at": c["start_at"],
@@ -281,24 +295,28 @@ def _campaign_task_row(account, camp, summary):
             "reward_credit": 0,
             "reward_energy": 0,
         }
-    claimable = [c for c in items
-                 if c["claim_status"] == "CLAIMABLE"
-                 and c["action_type"] in ("", "CLAIM_BENEFIT")]
-    # 只把"每日领取 Credits"类的已领取计入任务行；VIEW_DETAILS 之类的
-    # 0 积分浏览活动不再混进「已领取」文案
-    claimed = [c for c in items if c["claim_status"] == "CLAIMED"
-               and c["action_type"] in ("", "CLAIM_BENEFIT")]
+    # 每日签到行只统计"可领取的 Credits 类"活动：券类由独立行呈现（见
+    # _extra_campaign_rows），VIEW_DETAILS（无奖励的详情活动）不算"签到奖励"
+    def _is_daily(c):
+        return (c["action_type"] in ("", "CLAIM_BENEFIT")
+                and c["benefit_kind"] in ("", "CREDITS"))
+
+    daily_items = [c for c in items if _is_daily(c)]
+    claimable = [c for c in daily_items if c["claim_status"] == "CLAIMABLE"]
+    # 只把"每日领取 Credits"类的已领取计入任务行；券类/详情类不混进「已领取」文案
+    claimed = [c for c in daily_items if c["claim_status"] == "CLAIMED"]
     # 成就门控活动（如 CN 新人「奶茶免单卡」需先完成 sites_first_use）：
     # 服务端状态 ACHIEVEMENT_NOT_COMPLETED —— 显示成就要求，不能直接领取
-    gated = [c for c in items if c["claim_status"] == "ACHIEVEMENT_NOT_COMPLETED"]
+    gated = [c for c in daily_items
+             if c["claim_status"] == "ACHIEVEMENT_NOT_COMPLETED"]
 
     if claimable:
         amount = sum(c["benefit_amount"] or 0 for c in claimable)
-        keys = ", ".join(c["key"] for c in claimable)
+        keys = ", ".join(c["title"] for c in claimable)
         return {
             "task_code": "daily_checkin",
             "name": "每日签到（每日领取 Credits）",
-            "description": "可领取 %s Credits（%s）—— 点「一键签到」或该账号行的「签到」直接领取；%s"
+            "description": "可领取 %s Credits（%s）—— 点「领取全部福利」或该账号行的「签到」直接领取；%s"
                            % (amount or "-", keys,
                               qoder_accounts.round_note(claimable)),
             "jump_url": jump,
@@ -310,7 +328,7 @@ def _campaign_task_row(account, camp, summary):
         }
     if claimed:
         amount = sum(c["benefit_amount"] or 0 for c in claimed)
-        keys = ", ".join(c["key"] for c in claimed)
+        keys = ", ".join(c["title"] for c in claimed)
         return {
             "task_code": "daily_checkin",
             "name": "每日签到（每日领取 Credits）",
@@ -325,7 +343,7 @@ def _campaign_task_row(account, camp, summary):
             "reward_energy": 0,
         }
     if gated:
-        keys = ", ".join(c["key"] for c in gated)
+        keys = ", ".join(c["title"] for c in gated)
         reqs = ", ".join(c.get("required_achievement_key") or "?"
                          for c in gated)
         return {
@@ -360,6 +378,261 @@ def _campaign_task_row(account, camp, summary):
     }
 
 
+def _acct_name(a):
+    return (a.nickname or a.uid[:8]).strip()
+
+
+def _kind_label(kind):
+    """非 Credits 奖励的形态名（兑换码/兑换券/优惠券）。"""
+    return {"REDEMPTION_CODE": "兑换码", "REDEMPTION_COUPON": "兑换券",
+            "COUPON": "优惠券"}.get(str(kind or "").upper(), str(kind or "").upper() or "奖励")
+
+
+# 活动中文名兜底（服务端 placements 没带 content.zh 时用；前缀匹配）
+CAMPAIGN_NAME_FALLBACK = {
+    "act-20260928-620": "新人任务：发布 Qoder 站点领奶茶免单卡",
+    "act-20260928": "新人任务：发布 Qoder 站点领奶茶免单卡",
+    "act-20260930": "每天领 100 Credits",
+    "act-20260923": "每天领 100 Credits",
+    "act-20260901-922": "限时福利：专业版/高级版首月 Credits 翻倍",
+    "act-20260901": "全新 Qoder 上线福利",
+}
+
+
+def campaign_title(c):
+    """活动中文名：官方 content.zh.title 优先，其次内置兜底，最后回退 key。"""
+    c = c or {}
+    t = str(c.get("title_zh") or "").strip()
+    if t:
+        return t
+    key = str(c.get("campaign_key") or c.get("campaign_id") or "")
+    if key in CAMPAIGN_NAME_FALLBACK:
+        return CAMPAIGN_NAME_FALLBACK[key]
+    for prefix, name in CAMPAIGN_NAME_FALLBACK.items():
+        if key.startswith(prefix):
+            return name
+    kind = str((c.get("benefit") or {}).get("kind") or "").upper()
+    return {"REDEMPTION_CODE": "限时活动（兑换码）",
+            "REDEMPTION_COUPON": "限时活动（兑换券）",
+            "COUPON": "限时活动（优惠券）",
+            "CREDITS": "限时活动（Credits）"}.get(kind) or (key or "限时活动")
+
+
+def campaign_desc(c):
+    """活动官方中文说明（content.zh.description）。"""
+    return str((c or {}).get("desc_zh") or "").strip()
+
+
+def campaign_link(c):
+    """活动详情页（优先官方 detailUrl，如 docs 活动页），其次 campaignUrl。"""
+    return str((c or {}).get("detail_url") or "").strip()
+
+
+def _extra_campaign_rows(account, camp):
+    """把「非 Credits 奖励」的活动渲染成独立任务行（如奶茶免单卡）。
+
+    官方活动平台里 `benefit.kind` 决定奖励形态：
+      CREDITS        -> 每日 100 等，由 daily_checkin 行统一呈现
+      REDEMPTION_CODE/REDEMPTION_COUPON/COUPON -> 兑换码/券（如「奶茶免单卡」），
+                      领取后代码必须展示给用户（官方客户端是二维码+兑换码）
+    状态语义与官方前端一致：
+      CLAIMABLE -> completed（待领奖）；CLAIMED -> claimed（已领，附兑换码）
+      REDEMPTION_CODE_OUT_OF_STOCK -> 本轮名额已发完，10:00 开启新一轮
+      ACHIEVEMENT_NOT_COMPLETED    -> 需先完成指定成就（新人任务）
+    """
+    rows = []
+    for c in camp.get("campaigns") or []:
+        kind = str((c.get("benefit") or {}).get("kind") or "").upper()
+        if kind in ("", "CREDITS"):
+            continue          # Credits 类已由 daily_checkin 行呈现
+        key = c.get("campaign_key") or c.get("campaign_id")
+        status_raw = str(c.get("claim_status") or "").upper()
+        zh_name = campaign_title(c)
+        zh_desc = campaign_desc(c)
+        link = campaign_link(c) or (camp.get("campaign_url") or "")
+        reason = str(c.get("unavailable_reason") or "").upper()
+        need = str(c.get("required_achievement_key") or "")
+        label = _kind_label(kind)
+        reward_text = "%s ×%s" % (label, (c.get("benefit") or {}).get("amount") or 1)
+        code = ((account.campaign_codes or {}).get(c["campaign_id"]) or "") \
+            if hasattr(account, "campaign_codes") else ""
+        if status_raw == "CLAIMED":
+            row_status = "claimed"
+            desc = "已领取：%s" % reward_text
+            if code:
+                desc += "，兑换码 %s（在官方活动页可扫码）" % code
+            else:
+                desc += "，兑换码发放确认中"
+        elif status_raw == "CLAIMABLE":
+            row_status = "completed"
+            desc = "可领取：%s —— 点「领取全部福利」自动领取" % reward_text
+        elif reason == "REDEMPTION_CODE_OUT_OF_STOCK" or (
+                status_raw == "NOT_ELIGIBLE" and not need):
+            row_status = "not_accepted"
+            desc = "本轮名额已发完（每日 10:00 开启新一轮）：%s" % reward_text
+        elif reason == "ACHIEVEMENT_NOT_COMPLETED" \
+                or c.get("achievement_completed") is False:
+            row_status = "not_accepted"
+            desc = "需先在官方桌面端完成新人任务（成就 %s）后可领：%s" % (
+                need or "?", reward_text)
+        elif reason in ("CAMPAIGN_NOT_ACTIVE",):
+            row_status, desc = "not_accepted", "活动已结束/未开始：%s" % reward_text
+        elif c.get("end_at") and c["end_at"] < time.time():
+            row_status, desc = "not_accepted", "活动已结束：%s" % reward_text
+        else:
+            row_status = "not_accepted"
+            desc = "暂不可领取%s：%s" % (("（%s）" % reason) if reason else "",
+                                     reward_text)
+        if zh_desc:
+            desc = "%s（%s）" % (desc, zh_desc)
+        rows.append({
+            "task_code": "campaign:%s" % key,
+            "name": zh_name,
+            "description": desc,
+            "jump_url": link,
+            "status": row_status,
+            "current": 1 if row_status in ("completed", "claimed") else 0,
+            "target": 1,
+            "reward_credit": 0,
+            "reward_energy": 0,
+            "reward_text": reward_text,
+            "code": code,
+        })
+    return rows
+
+
+def _campaign_state_cn(status, reason, achievement_ok, action_type=""):
+    """把活动状态归一成中文分类（与官方前端状态机一致）。
+
+    action_type 非 CLAIM_BENEFIT（如 VIEW_DETAILS 的"点击查看"类活动）单独归为
+    view_only：它没有奖励可领，聚合行里标成"可领"会让人点了「领取全部福利」
+    却什么都没发生（领取路径会跳过它）。
+    """
+    st = str(status or "").upper()
+    rs = str(reason or "").upper()
+    if str(action_type or "") not in ("", "CLAIM_BENEFIT"):
+        return "view_only"
+    if st == "CLAIMABLE":
+        return "claimable"
+    if st == "CLAIMED":
+        return "claimed"
+    if rs == "REDEMPTION_CODE_OUT_OF_STOCK":
+        return "out_of_stock"
+    if rs == "CAMPAIGN_NOT_ACTIVE":
+        return "inactive"
+    if rs == "RISK_BLOCKED":
+        return "risk_blocked"
+    if rs == "ACHIEVEMENT_NOT_COMPLETED" or achievement_ok is False:
+        return "task_required"
+    return "ineligible"
+
+
+def aggregate_campaign_rows(accounts, gap=0.0):
+    """uid=all：把全部账号的活动**按活动聚合成行**，并给出每账号资格明细。
+
+    现场反馈：只显示"某个账号"的活动会让人以为没资格的活动不存在；这里对每个
+    活动列出哪几个账号可领/已领/名额发完/需先完成任务/**无资格（不在定向内）**，
+    批量领取时仍然只对"服务端判定可领"的账号发起（逐个账号独立判断，只有上游
+    真的返回 SAME_PERSON_ALREADY_CLAIMED 才退避）。
+
+    返回 (rows, codes)：rows 为任务行；codes 为各账号已领取的兑换码明细。
+    """
+    merged = {}          # campaign_key -> {"c": 样例活动, "by": {状态: [账号名]}}
+    codes = []
+    total = len(accounts)
+    # 每个账号的活动列表都要拉一次（上游最慢的一环）：并行取回，保持面板
+    # 秒级响应；campaigns() 自带 20s 缓存，短时间重复查看不会重复打上游。
+    states = {}
+    if len(accounts) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(6, len(accounts))) as ex:
+            futs = {acc.uid: ex.submit(acc.campaigns) for acc in accounts}
+            for acc in accounts:
+                try:
+                    states[acc.uid] = futs[acc.uid].result()
+                except Exception:
+                    states[acc.uid] = {"ok": False}
+    else:
+        for acc in accounts:
+            try:
+                states[acc.uid] = acc.campaigns()
+            except Exception:
+                states[acc.uid] = {"ok": False}
+    for acc in accounts:
+        st = states.get(acc.uid) or {"ok": False}
+        for cid, code in (getattr(acc, "campaign_codes", {}) or {}).items():
+            if code:
+                codes.append({"account": acc.uid, "nickname": _acct_name(acc),
+                              "realm": acc.realm, "campaign_id": cid,
+                              "campaign": cid, "code": code,
+                              "url": (acc.campaign_status or {}).get("campaign_url") or ""})
+        if not st.get("ok"):
+            continue
+        for c in st.get("campaigns") or []:
+            key = c["campaign_key"] or c["campaign_id"]
+            slot = merged.setdefault(key, {"c": c, "by": {}})
+            state = _campaign_state_cn(c.get("claim_status"),
+                                       c.get("unavailable_reason"),
+                                       c.get("achievement_completed"),
+                                       c.get("action_type"))
+            slot["by"].setdefault(state, []).append(_acct_name(acc))
+    # 活动没出现在某账号列表里 = 该账号不在定向内（无资格）——如实标注
+    for key, slot in merged.items():
+        listed = [n for names in slot["by"].values() for n in names]
+        missing = [a for a in (_acct_name(x) for x in accounts) if a not in listed]
+        if missing:
+            slot["by"]["no_eligibility"] = missing
+
+    ORDER = ("claimable", "claimed", "out_of_stock", "task_required",
+             "risk_blocked", "inactive", "view_only", "ineligible",
+             "no_eligibility")
+    LABEL = {"claimable": "可领", "claimed": "已领", "out_of_stock": "名额发完",
+             "task_required": "需先完成任务", "risk_blocked": "风控拦截",
+             "inactive": "活动已结束", "view_only": "仅查看(无奖励)",
+             "ineligible": "暂不可领",
+             "no_eligibility": "无资格(不在定向)"}
+    rows = []
+    for key, slot in merged.items():
+        c = slot["c"]
+        by = slot["by"]
+        parts = ["%s %d/%d：%s" % (LABEL[k], len(by[k]), total, "、".join(by[k]))
+                 for k in ORDER if by.get(k)]
+        kind = str((c.get("benefit") or {}).get("kind") or "").upper()
+        amount = (c.get("benefit") or {}).get("amount") or 0
+        if kind in ("", "CREDITS"):
+            reward_text, reward_credit = "", amount
+        else:
+            reward_text = "%s ×%s" % (_kind_label(kind), amount or 1)
+            reward_credit = 0
+        if by.get("claimable"):
+            status = "completed"
+        elif by.get("claimed") and not by.get("claimable"):
+            status = "claimed"
+        else:
+            status = "not_accepted"
+        zh_name = campaign_title(c)
+        zh_desc = campaign_desc(c)
+        desc_all = "；".join(parts)
+        if zh_desc:
+            desc_all = "%s（%s）" % (desc_all, zh_desc)
+        rows.append({
+            "task_code": "campaign:%s" % key,
+            "name": zh_name,
+            "description": desc_all,
+            "jump_url": campaign_link(c),
+            "status": status,
+            "current": 1 if status in ("completed", "claimed") else 0,
+            "target": 1,
+            "reward_credit": reward_credit,
+            "reward_energy": 0,
+            "reward_text": reward_text,
+            "accounts_by_state": by,
+        })
+    rows.sort(key=lambda r: (r["status"] != "completed", r["status"] != "claimed",
+                             r["name"]))
+    return rows, codes
+
+
 def fetch_tasks_view(pool, realm=None, uid=None):
     """看板 /tasks 聚合：选定账号的任务行 + 全部可操作账号列表。
 
@@ -375,18 +648,11 @@ def fetch_tasks_view(pool, realm=None, uid=None):
     if not eligible:
         return {"tasks": [], "summary": {}, "accounts": [],
                 "msg": "未找到可用账号（账号已禁用、缺少凭证或不属于该区域）"}
-    acc = None
-    if uid and uid != "all":
-        target = pool.get(uid)
-        if target and target in eligible:
-            acc = target
-    batch_mode = acc is None
-    if acc is None:
-        acc = eligible[0]
-    tasks, summary = fetch_task_view(acc)
-    if batch_mode:
-        # 「全部账号 (批量)」视图：余额卡片显示**各账号合计**（此前用的是
-        # 首个账号的快照，账号一多就对不上；单账号视图保持原样）。
+    acct_list = [{"uid": a.uid, "nickname": a.nickname or a.uid[:8],
+                  "realm": a.realm} for a in eligible]
+    if not uid or uid == "all":
+        # 「全部账号 (批量)」视图：按"活动"聚合（谁有资格/谁没有一目了然），
+        # 批量领取仍由 run_batch_checkin 逐账号判断（只对服务端判定可领的账号发起）。
         # 快照过期（> CREDITS_STALE_TTL）的账号并行重拉，避免部署端长期
         # 显示旧余额；20 秒面板缓存已在上层挡住高频重复请求。
         stale = [a for a in eligible if _credits_stale(a)]
@@ -394,6 +660,7 @@ def fetch_tasks_view(pool, realm=None, uid=None):
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=min(4, len(stale))) as ex:
                 list(ex.map(_refresh_credits_safe, stale))
+        tasks, codes = aggregate_campaign_rows(eligible)
         breakdown, total = [], 0
         for a in eligible:
             remain = int((a.credits or {}).get("remain") or 0)
@@ -402,10 +669,24 @@ def fetch_tasks_view(pool, realm=None, uid=None):
                               "nickname": a.nickname or a.uid[:8],
                               "realm": a.realm,
                               "remain": remain})
-        summary["energy"] = total
-        summary["energy_breakdown"] = breakdown
-    acct_list = [{"uid": a.uid, "nickname": a.nickname or a.uid[:8],
-                  "realm": a.realm} for a in eligible]
+        summary = {"mode": "all", "realm": realm or "",
+                   "accounts_total": len(eligible), "energy": total,
+                   "energy_breakdown": breakdown,
+                   "streak_days": 0, "travel": {"state": "unknown"},
+                   "plan": "全部账号", "codes": codes,
+                   "credits": {"remain": total},
+                   "campaigns": {"show": True, "claimable": False,
+                                 "url": "", "items": []}}
+        return {"tasks": tasks, "summary": summary, "account": None,
+                "accounts": acct_list, "mode": "all"}
+    acc = None
+    if uid:
+        target = pool.get(uid)
+        if target and target in eligible:
+            acc = target
+    if acc is None:
+        acc = eligible[0]
+    tasks, summary = fetch_task_view(acc)
     return {"tasks": tasks, "summary": summary, "account": acc.public(),
             "accounts": acct_list}
 
@@ -413,7 +694,7 @@ def fetch_tasks_view(pool, realm=None, uid=None):
 # ---------------------------------------------------------------------------
 # 单账号：签到执行
 # ---------------------------------------------------------------------------
-def run_checkin(account, gap=1.0):
+def run_checkin(account, gap=1.0, only_daily=False):
     """为一个账号执行签到闭环。返回 {ok, logs, earned_credit, credits}。
 
     顺序（与官方现状一致）：
@@ -421,37 +702,54 @@ def run_checkin(account, gap=1.0):
          的真实入口——带桌面端请求头列出活动 → 对 CLAIMABLE 的 Credits 活动
          POST /claim（幂等，已领过返回 replayed）。双区域通用。
       2. 旧 sash 签到接口：活动平台没拿到东西时兜底（老账号/老活动仍可能有效）。
+
+    only_daily=True：只做"每日签到领积分"（Credits 类活动），不触碰兑换码/券类
+    福利与 Pro 包——账号面板的「每日签到」按钮走这条。
     """
+    only_kinds = ("", "CREDITS") if only_daily else None
     logs = []
     name = account.nickname or account.uid[:8]
     logs.append(f"开始为账号 [{name}] 执行每日签到...")
 
     # --- 1) 活动平台（官方现行机制） ---
-    camp = account.campaign_checkin()
+    camp = account.campaign_checkin(only_kinds=only_kinds)
     earned = 0
     if camp.get("claimed"):
-        keys = ", ".join(c.get("campaign_key") or c.get("campaign_id")
-                         for c in camp["claimed"])
+        keys = ", ".join(qoder_accounts.campaign_label(c) for c in camp["claimed"])
         earned = int(camp.get("earned") or 0)
-        round_note = qoder_accounts.round_note(camp.get("claimed"))
-        logs.append(f"✓ [{name}] 活动领取成功 +{earned} Credits（{keys}）{round_note}")
+        head = ("活动领取成功 +%d Credits（%s）" % (earned, keys)) if earned \
+            else ("活动领取成功（%s）" % keys)
+        logs.append(f"✓ [{name}] {head}"
+                    f"{qoder_accounts.round_note(camp['claimed'])}")
     elif camp.get("blocked"):
         codes = ", ".join(b.get("failure_code") or "?" for b in camp["blocked"])
         logs.append(f"⚠ [{name}] 同人已领取：同一设备/身份下其他账号本轮已领"
                     f"（服务端按人去重，{codes}），本号本轮不再发放")
     elif camp.get("already"):
-        keys = ", ".join(c.get("campaign_key") or c.get("campaign_id")
+        keys = ", ".join(qoder_accounts.campaign_label(c)
                          for c in camp["already"])
         # 轮次不是自然日（10:00 滚动）：日志用"本轮"，不再写"今日"，
         # 否则上午 10 点前看到的"已领取"会被误当成今天领过
-        round_note = qoder_accounts.round_note(camp.get("already"))
-        logs.append(f"✓ [{name}] 本轮奖励已领取（{keys}）{round_note}")
+        logs.append(f"✓ [{name}] 本轮奖励已领取（{keys}）"
+                    f"{qoder_accounts.round_note(camp['already'])}")
     elif camp.get("ok"):
         logs.append(f"— [{name}] {camp.get('message')}")
     else:
         logs.append(f"! [{name}] 活动平台查询失败：{camp.get('error')}")
 
+    # 兑换码（券类已领/刚领）：单独列出，方便用户复制
+    for item in camp.get("codes") or []:
+        logs.append(f"  [{name}] {item['campaign']} 兑换码：{item['code']}"
+                    f"（官方活动页可扫码兑换）")
+
     if camp.get("claimed") or camp.get("already") or camp.get("ok"):
+        for item in camp.get("pending") or []:
+            logs.append("  [%s] %s：本轮名额已发完，10:00 开启新一轮后自动重试"
+                        % (name, qoder_accounts.campaign_label(item)))
+        for item in camp.get("locked") or []:
+            logs.append("  [%s] %s：需先在官方桌面端完成新人任务（成就 %s）"
+                        % (name, qoder_accounts.campaign_label(item),
+                           item.get("required_achievement_key") or "?"))
         time.sleep(gap)
         if account.fetch_credits().get("ok"):
             logs.append(f"  当前额度余额: {account.credits.get('remain', 0)}")
@@ -515,10 +813,10 @@ def run_pro_claim(account):
 
 
 # ---------------------------------------------------------------------------
-# 批量：看板「一键签到领积分」/「领取福利包」
+# 批量：看板「领取全部福利」/「仅领 Pro 福利包」
 # ---------------------------------------------------------------------------
 def run_batch_checkin(targets, gap=1.0, inter_gap=1.5):
-    """批量签到。返回 {ok, logs, credit_added, accounts_count}。"""
+    """批量签到（全部活动，含券类）。返回 {ok, logs, credit_added, accounts_count}。"""
     combined, total, done = [], 0, 0
     for i, acc in enumerate(targets):
         nick = acc.nickname or acc.uid[:8]

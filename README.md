@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.4-2496ED?style=flat-square" alt="Version 1.2.4">
+  <img src="https://img.shields.io/badge/Release-v1.2.5-2496ED?style=flat-square" alt="Version 1.2.5">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -225,11 +225,13 @@ docker run -d --name qoder-proxy --restart unless-stopped \
   2. **真实机器身份**（`Cosy-MachineToken/Type/Code`）——官方桌面端在拉活动前会 spawn 自带的风控桥 `resources/umid/runtime-info.exe prod --account-stdin`（stdin `{"account": <uid>}`）取真值；用派生假值时列表会**静默少掉设备定向活动**（「每日领取 100 Credits」即其中之一）。网关现在调用同一个官方二进制取真值（结果按区域缓存 **30 分钟**、领取前强制刷新、列表被判为未认可时自动换新身份重试，`QD_NATIVE_IDENTITY=0` 可关闭），失败才回退派生值并在活动状态里标注 `identity=derived`；
      - **跨区借用**：机器身份是**机器级、与区域无关**的（实测同一机器上国内/国际账号取到的 token/type/code 完全一致，桥的输出里也没有区域字段）。因此**只装了单区客户端时，另一区借用同一个桥**（本区域客户端 > 本区域 CLI 缓存 `~/.qoder-cn(.qoder)/.bin/umid-*` > 另一区，`QD_RUNTIME_INFO=<路径>` 可显式指定）——以前"只装国内版 → 国际账号一直是派生假身份"的短板已修复；
 - **领取**：对 `claimStatus=CLAIMABLE` 且 `actionType=CLAIM_BENEFIT` 的活动 `POST /sash/api/v1/me/campaigns/{campaignId}/claim`（逆向自官方 `growth-page/activity-iframe` 页面 JS）。**官方幂等**：已领取返回 `{"status":"CLAIMED","replayed":true}`，不会重复发放；`GET …/{id}/reward` 可查发放状态；
-- **任务中心**：`daily_checkin` 行直接反映真实活动状态——可领取显示「可领取 100 Credits（act-…）—— 点『一键签到』自动领取」，已领取显示「今日已领取 +100 Credits，明日再来」；
+- **券/兑换码类奖励**（`benefit.kind=REDEMPTION_CODE/REDEMPTION_COUPON/COUPON`）：领取端点与积分活动相同，奖励码在响应的 `redemptionCode` 字段（官方前端语义：CLAIMED 且码非空才算拿到，否则"确认中"）。网关把兑换码**落盘到账号文件**（`campaignCodes`）并在看板「兑换码 / 券」面板展示（可复制、可跳官方活动页扫码）；领取瞬间的名额发完（`REDEMPTION_CODE_OUT_OF_STOCK`）按"本轮已发完（每日 10:00 开启新一轮）"如实呈现，不算失败；
+- **任务中心**：`daily_checkin` 行只统计 Credits 类活动（券类单独成行，奖励列显示「兑换码 ×1」）——可领取显示「可领取 100 Credits（每天领 100 Credits）—— 点『领取全部福利』自动领取」，已领取显示「本轮已领取 +100 Credits（…）；本轮截止 X（每日 10:00 开启新一轮）」；
+- **全部账号（批量）视图**：活动**按活动聚合成行**并逐账号标注资格（可领/已领/名额发完/需先完成任务/无资格(不在定向)），券类奖励行显示「兑换码 ×N」；下方「已领取的兑换码 / 券（按账号）」面板列出每个账号拿到的兑换码；
 - **旧 sash 接口**（`/sash/api/v1/me/daily-check-in/*`）仅在仍开放时作为兜底并附一行历史状态；能力运行时探测（404/405/410 记「本区域无此接口」，6 小时后自动重探）。实测国内版 `status=DISABLED`、国际版全 404；
 - **额度体系**：`/api/v2/quota/usage` 聚合基础额度 + 赠送/签到额度；`/api/v2/user/plan` 套餐名（Pro Trial 等）；
 - **Pro 福利包**：一次性 +1800 积分，`eligibility → claim` 两步走（端点 404 时视为活动未开放）；
-- **看板「签到与福利中心」**：连续签到天数、积分余额、福利包状态卡片 + 任务行表格，支持单账号/批量；国内版与国际版账号都会列出；另含「本机虚拟化检测」卡片（见下）。
+- **看板「签到与福利中心」**：连续签到天数、积分余额、福利包状态卡片 + 任务行表格，支持单账号/批量；主按钮「领取全部福利」= 每日签到/全部活动（含券类）+ Pro 福利包（均幂等），账号行的「签到」只做每日签到领积分；国内版与国际版账号都会列出；另含「本机虚拟化检测」卡片（见下）。
 
 **官方活动与新人权益规则**（官方文档原文 + 实测，解释"为什么有的号有、有的没有"）：
 
@@ -321,13 +323,13 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | POST | /v1/responses | Responses API 协议接口 |
 | GET | /v1/models | 模型列表（动态拉取 + 静态兜底，含能力与规格宣告） |
 | GET | /tasks | 签到状态、连续天数、福利包资格与额度快照 |
-| POST | /tasks/run | 触发批量每日签到与领奖 |
+| POST | /tasks/run | 触发批量签到与全部活动领奖（含券/兑换码类） |
 | POST | /tasks/travel | 批量领取 Pro 福利包 |
 | GET | /scheduler | 定时调度器运行状态与排程日志 |
 | POST | /scheduler/trigger | 手动立即执行后台巡检保活 |
 | POST | /accounts/login/start | 发起 OAuth 设备授权 |
 | POST | /accounts/import/pat | 导入 PAT 令牌 |
-| POST | /accounts/checkin | 手动签到（单个/全部） |
+| POST | /accounts/checkin | 手动每日签到（单个/全部；只领 Credits 类，不动券类） |
 | GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
 | GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
 | GET | /identity/export | 导出本机机器身份（面板鉴权；给没有官方客户端的服务器固定用） |
@@ -337,12 +339,12 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 ## 六、开发与测试
 
 ```bash
-# 离线确定性测试（430 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
+# 离线确定性测试（503 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
 # 自定义 B64、COSY 签名、双区官方目录全字段（峰谷价/多窗口/思考档位/展示 id/解析）、
 # 独占路由、签到能力运行时探测与 DISABLED 归一化、活动平台归一化（含同人去重
 # BLOCKED）、成就门控任务行、虚拟化状态映射、版本检测三态、面板短缓存命中/失效、
 # DeepSeek reasoning_content 回填与 flatten 保留、请求体、信封解包、custom 工具转译、
-# 本机凭证扫描）
+# 本机凭证扫描、券类兑换码落盘/中文活动名/全部账号聚合/信封层 403-10605 冷却）
 python _test_qoder.py
 
 # 直接启动
@@ -384,6 +386,16 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.5
+
+**移植上游 2026-10-01/02 的新功能（券类活动、中文活动名、全部账号聚合、信封层冷却）**
+
+- **券/兑换码类活动可领、并保住兑换码**：活动平台除了"每日 100 Credits"，还有兑换码/券类奖励（如国内新人「奶茶免单卡」`act-20260928-620`，`benefit.kind=REDEMPTION_CODE`）。网关现在会领取并把 `redemptionCode` **落盘保存到账号文件**（重启不丢），任务中心为其单独出一行（奖励列显示「兑换码 ×1」），签到日志打印兑换码，看板新增「已领取的兑换码 / 券（按账号）」面板（复制 + 打开活动页/二维码）；
+- **活动名显示官方中文**：从服务端 `placements[].content.zh` 提取标题/说明/详情页（如「发布 Qoder 站点，免费领取奶茶免单卡」「每天领 100 Credits」），无官方文案时用内置兜底表，最后才回退活动 key；
+- **签到按钮语义拆分**：账号行的「签到」只做**每日签到领积分**（Credits 类，不碰券类）；签到与福利中心主按钮改为「**领取全部福利**」（= 全部活动含券类 + Pro 福利包，均幂等，日志合并展示），旁边保留「仅领 Pro 福利包」。券类领取瞬间"名额发完/成就未完成"会按待补货/待完成分类（不再是"领取失败"），同人已领取（`SAME_PERSON_ALREADY_CLAIMED`）记 6 小时冷却，冷却期内不再重复 POST；
+- **全部账号视图按活动聚合**：每个活动一行，描述形如「可领 1/2：A；已领 1/2：B；无资格(不在定向) 1/2：C」；活动没出现在某账号列表里会**如实标注"无资格(不在定向)"**，而不是让人以为活动不存在。兑换码按账号收集展示；
+- **信封层 403/10605（队列满）冷却 + 换号**（移植上游 PR #7 by @XD06）：上游存在"先回 HTTP 200、再把错误装进 SSE 信封"的投递方式（如 `10605 队列已满`）。此前这种错误既不冷却账号也不轮换，会被同一个满队列账号反复撞；现在按上游 `retryAfterSeconds`（缺省 30s）做模型级冷却、403/401 做账号级冷却（死会话 300s + 停用）、429 模型级冷却，并解绑会话亲和触发换号；未向客户端吐出字节时 401/403/429 允许重开上游换号重试。
 
 ### v1.2.4
 
