@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.3-2496ED?style=flat-square" alt="Version 1.2.3">
+  <img src="https://img.shields.io/badge/Release-v1.2.4-2496ED?style=flat-square" alt="Version 1.2.4">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -384,6 +384,11 @@ python _verify_models.py --base http://127.0.0.1:8790
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.4
+
+**补完轮次文案：调度器签到日志同步改「本轮」**
+- v1.2.3 改了任务行与签到结果，但调度器日志里"已领取"仍是"今日已领取（act-…）"——上午 10 点前跑巡检时这条日志指的是**上一轮**，口径不一致。现统一为「本轮奖励已领取（act-…）本轮截止 X（每日 10:00 开启新一轮）」，成功领取的日志也附本轮截止时间。
 
 ### v1.2.3
 

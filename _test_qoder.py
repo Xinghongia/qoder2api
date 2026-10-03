@@ -2913,11 +2913,11 @@ print("[30] round window (10:00 rollover) wording + identity-filtered retry")
 
 # 轮次说明：10:00 滚动（10:00 ~ 次日 09:59），上午点到的"已领取"是上一轮
 _future_end = int(time.time()) + 3600
-_note_future = A._round_note([{"end_at": _future_end}])
+_note_future = A.round_note([{"end_at": _future_end}])
 check("round note shows the round deadline + 10:00 rollover",
       "本轮截止" in _note_future and "10:00" in _note_future, _note_future)
 check("round note without windows still explains the 10:00 rollover",
-      "每日 10:00" in A._round_note([]), A._round_note([]))
+      "每日 10:00" in A.round_note([]), A.round_note([]))
 
 # campaign_checkin: 已领取消息带轮次说明（不再写"今日已领取/明日再来"）
 def fake_claimed_with_window(url, **kw):

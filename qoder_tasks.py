@@ -292,16 +292,6 @@ def _campaign_task_row(account, camp, summary):
     # 服务端状态 ACHIEVEMENT_NOT_COMPLETED —— 显示成就要求，不能直接领取
     gated = [c for c in items if c["claim_status"] == "ACHIEVEMENT_NOT_COMPLETED"]
 
-    def _round_suffix(rows):
-        # 轮次与自然日不同：每日 10:00（UTC+8）滚动（本轮 10:00 ~ 次日 09:59）。
-        # 上午 10 点前显示的"已领取"是**昨天那一轮**，必须如实写出来。
-        ends = [r.get("end_at") or 0 for r in rows]
-        end = max(ends) if ends else 0
-        if end and end > time.time():
-            return "本轮截止 %s（每日 10:00 开启新一轮）" % time.strftime(
-                "%m-%d %H:%M", time.localtime(end))
-        return "每日 10:00 开启新一轮"
-
     if claimable:
         amount = sum(c["benefit_amount"] or 0 for c in claimable)
         keys = ", ".join(c["key"] for c in claimable)
@@ -309,7 +299,8 @@ def _campaign_task_row(account, camp, summary):
             "task_code": "daily_checkin",
             "name": "每日签到（每日领取 Credits）",
             "description": "可领取 %s Credits（%s）—— 点「一键签到」或该账号行的「签到」直接领取；%s"
-                           % (amount or "-", keys, _round_suffix(claimable)),
+                           % (amount or "-", keys,
+                              qoder_accounts.round_note(claimable)),
             "jump_url": jump,
             "status": "completed",
             "current": 1,
@@ -325,7 +316,7 @@ def _campaign_task_row(account, camp, summary):
             "name": "每日签到（每日领取 Credits）",
             "description": "本轮已领取%s（%s）；%s"
                            % ((" +%s Credits" % amount) if amount else "", keys,
-                              _round_suffix(claimed)),
+                              qoder_accounts.round_note(claimed)),
             "jump_url": jump,
             "status": "claimed",
             "current": 1,
@@ -442,7 +433,8 @@ def run_checkin(account, gap=1.0):
         keys = ", ".join(c.get("campaign_key") or c.get("campaign_id")
                          for c in camp["claimed"])
         earned = int(camp.get("earned") or 0)
-        logs.append(f"✓ [{name}] 活动领取成功 +{earned} Credits（{keys}）")
+        round_note = qoder_accounts.round_note(camp.get("claimed"))
+        logs.append(f"✓ [{name}] 活动领取成功 +{earned} Credits（{keys}）{round_note}")
     elif camp.get("blocked"):
         codes = ", ".join(b.get("failure_code") or "?" for b in camp["blocked"])
         logs.append(f"⚠ [{name}] 同人已领取：同一设备/身份下其他账号本轮已领"
@@ -450,7 +442,10 @@ def run_checkin(account, gap=1.0):
     elif camp.get("already"):
         keys = ", ".join(c.get("campaign_key") or c.get("campaign_id")
                          for c in camp["already"])
-        logs.append(f"✓ [{name}] 今日活动奖励已领取（{keys}）")
+        # 轮次不是自然日（10:00 滚动）：日志用"本轮"，不再写"今日"，
+        # 否则上午 10 点前看到的"已领取"会被误当成今天领过
+        round_note = qoder_accounts.round_note(camp.get("already"))
+        logs.append(f"✓ [{name}] 本轮奖励已领取（{keys}）{round_note}")
     elif camp.get("ok"):
         logs.append(f"— [{name}] {camp.get('message')}")
     else:

@@ -604,7 +604,7 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
 # ---------------------------------------------------------------------------
 # Account
 # ---------------------------------------------------------------------------
-def _round_note(items):
+def round_note(items):
     """活动轮次说明：本轮截止时间 + 每日 10:00 开启新一轮。
 
     轮次不是自然日：官方每日领取按 10:00（UTC+8）滚动（本轮窗口
@@ -1338,7 +1338,7 @@ class Account(object):
         if claimed:
             msg = "活动领取成功 +%d Credits（%s）；%s" % (
                 earned, ", ".join(c["campaign_key"] or c["campaign_id"]
-                                  for c in claimed), _round_note(claimed))
+                                  for c in claimed), round_note(claimed))
         elif blocked:
             msg = ("同人已领取：同一设备/身份下的其他账号本轮已领过（服务端按人去重，"
                    "failureCode=%s）" % blocked[0].get("failure_code"))
@@ -1346,7 +1346,7 @@ class Account(object):
             msg = "本轮奖励已领取（%s）；%s" % (
                 ", ".join(c["campaign_key"] or c["campaign_id"]
                           for c in daily_already),
-                _round_note(daily_already))
+                round_note(daily_already))
         elif errors:
             msg = "活动领取失败：%s" % "; ".join(errors)[:200]
         else:
