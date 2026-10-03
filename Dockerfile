@@ -17,12 +17,15 @@ RUN apk add --no-cache tzdata ca-certificates && \
 
 # Copy application files (Zero external pip dependencies needed -
 # AES/RSA/COSY signing are pure-stdlib implementations)
-COPY qoder_proxy.py qoder_accounts.py qoder_catalog.py qoder_fingerprint.py \
-     qoder_net.py qoder_scheduler.py qoder_settings.py qoder_sign.py \
-     qoder_tasks.py dashboard.html baseprompt.json ./
+COPY qoder_proxy.py ./
+COPY qoder2api/ ./qoder2api/
 
-# 官方模型目录快照（运行时优先读取；缺失会回退 qoder_catalog.py 内嵌冻结副本）
-COPY qoder_catalog_intl.json qoder_catalog_cn.json ./
+# 前端静态产物（源码在 web/，构建命令 npm run build:export；产物已入库，
+# 因此镜像构建不需要 Node）
+COPY web/out/ ./web/out/
+
+# 迁移期的旧看板（挂在 /legacy；下个版本移除）
+COPY legacy/dashboard.html ./legacy/dashboard.html
 
 # Create data directories
 RUN mkdir -p /app/accounts /app/usage

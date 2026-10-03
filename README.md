@@ -13,7 +13,7 @@
 
 - **开箱即用**：双击批处理脚本即启；亦支持 Docker 容器化部署，零外部 pip 依赖。
 - **本机已登录凭证一键入池（双区）**：只读探测桌面 App（`auth.v1.dat`，os_crypt/DPAPI 解密）与 Qoder CLI（`~/.qoder*/.auth/user`，AES-128-CBC）两类官方存储，看板两步确认导入，永不静默采用。
-- **模型清单完全跟官方走（双区不同、以官方此刻为准）**：三源优先级 —— 动态 `/algo/api/v2/model/list`（COSY 签名，**GET 需携带与签名一致的 `{}` body，否则 403**）> 本机官方客户端模型目录缓存（`~/.qoder*/.models/<uid>/catalog-v6`，QMC/HKDF+AES-256-GCM 解密）> 双区官方快照文件（`qoder_catalog_intl.json`/`qoder_catalog_cn.json`，`python _refresh_catalog.py` 一键随客户端更新）；清单**以动态源返回的集合为准**（官方桌面版此刻显示什么这里就显示什么，如国际版动态 15 条就不多塞静态独有的 `smodel/cmodel`）。**逐字段忠实保留**：`id` = **官方模型名**（如 `Qwen3.8-Max`，客户端唯一需要填的值；`upstream_key`/`aliases` 同时给出 key、`key (Name)` 与人类别名等全部可填形式）、官方桌面版介绍文案（`description`，取自客户端 dynamic-text）、本地化名（`name_local`，如 Ultimate→极致）、`context_config` 多窗口（200K 默认/400K/1M）、`thinking_config` 思考档位（low/medium/high/xhigh/max + 默认标注 + 可关闭）、**峰谷价**（`price_factor_peak` 促销前倍率 → `price_factor_valley` 谷时倍率 + `off_peak` 时段窗口 22:00-08:00 与官方错峰文案）、`is_free/is_new`；官方 `enable=false` 条目不过滤，附**官方原文禁用原因**（`disabled_reason = "需要升级或购买千问官方套餐开放"`，并透传上游 `disabled_message_key`）。**最大输出**：官方 catalog 与动态接口原始响应均无此字段，故不再输出/展示任何编造值。
+- **模型清单完全跟官方走（双区不同、以官方此刻为准）**：三源优先级 —— 动态 `/algo/api/v2/model/list`（COSY 签名，**GET 需携带与签名一致的 `{}` body，否则 403**）> 本机官方客户端模型目录缓存（`~/.qoder*/.models/<uid>/catalog-v6`，QMC/HKDF+AES-256-GCM 解密）> 双区官方快照文件（`qoder_catalog_intl.json`/`qoder_catalog_cn.json`，`python scripts/_refresh_catalog.py` 一键随客户端更新）；清单**以动态源返回的集合为准**（官方桌面版此刻显示什么这里就显示什么，如国际版动态 15 条就不多塞静态独有的 `smodel/cmodel`）。**逐字段忠实保留**：`id` = **官方模型名**（如 `Qwen3.8-Max`，客户端唯一需要填的值；`upstream_key`/`aliases` 同时给出 key、`key (Name)` 与人类别名等全部可填形式）、官方桌面版介绍文案（`description`，取自客户端 dynamic-text）、本地化名（`name_local`，如 Ultimate→极致）、`context_config` 多窗口（200K 默认/400K/1M）、`thinking_config` 思考档位（low/medium/high/xhigh/max + 默认标注 + 可关闭）、**峰谷价**（`price_factor_peak` 促销前倍率 → `price_factor_valley` 谷时倍率 + `off_peak` 时段窗口 22:00-08:00 与官方错峰文案）、`is_free/is_new`；官方 `enable=false` 条目不过滤，附**官方原文禁用原因**（`disabled_reason = "需要升级或购买千问官方套餐开放"`，并透传上游 `disabled_message_key`）。**最大输出**：官方 catalog 与动态接口原始响应均无此字段，故不再输出/展示任何编造值。
 - **双区域独立路由（三档出口模式）**：支持 🌐 国际版 (qoder.com / api1.qoder.sh，备用 api2/api3 自动故障切换) 与 🇨🇳 国内版 (qoder.com.cn / gateway.qoder.com.cn) 独立配置与管理；出口可选 **仅国际 / 仅国内 / 双区**——双区模式下选定**优先出口**，首选出口无可用账号（全部停用/冷却/凭证失效）时**自动切到另一区**，首选恢复后自动切回；区域独占模型（如国内 `q37fmodel`/`glm-5.2`、国际 `smodel`/`ultimate`）始终路由到归属出口并拦截错配 Key；选择落盘持久化、看板即改即生效。
 - **COSY 签名推理链路**：RSA 包裹 AES 会话密钥 + MD5 请求签名 + 自定义 Base64 请求体编码，纯标准库实现（含 AES-128/256、RSA-PKCS1v15、GCM、DPAPI、QMC 纯 Python 实现，Docker alpine 下同样零依赖），逆向对齐官方桌面/CLI 客户端协议。
 - **稳定物理设备指纹隔离 (`derive_id`)**：以账号自身 UID 稳定哈希派生专属 `cosy-machineid` / `cosy-machinetoken` / 会话标识，同一账号长期固定在同一台虚拟物理设备，天然防多号关联风控。
@@ -57,7 +57,7 @@
 
 > ⚠️ **"客户端一直显示工作中、一个字都不吐，网关日志也毫无变化"** → 九成是**网关没在跑**：请求根本没到达，所以日志自然一动不动。一条命令确诊：
 > ```bash
-> python _diag_gateway.py --chat   # 端口 → /ping → /health → /v1/models → 真实流式，逐项报出断在哪
+> python scripts/_diag_gateway.py --chat   # 端口 → /ping → /health → /v1/models → 真实流式，逐项报出断在哪
 > ```
 > - **生命周期就是那个 cmd 窗口**（刻意的设计）：窗口开着网关就活着，**关掉窗口网关即停**，不会有后台残留进程；下次要用重新双击 `start-qoder-proxy.bat` 即可。
 > - 判别口诀：日志时间戳停在某一刻、此后再无 `POST /v1/chat/completions` = 网关已停；重新双击启动脚本即可恢复。
@@ -186,7 +186,7 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 1) 动态接口  GET {gateway}/algo/api/v2/model/list?Encode=1   （COSY 签名，需账号，300s 缓存）
 2) 本机官方客户端目录 ~/.qoder*/.models/<uid>/catalog-v6      （QMC 解密，离线可用）
 3) 内置双区官方快照 qoder_catalog_intl.json / qoder_catalog_cn.json
-   （客户端更新后 `python _refresh_catalog.py` 一条命令重新导出并打印差异；
+   （客户端更新后 `python scripts/_refresh_catalog.py` 一条命令重新导出并打印差异；
     两个文件缺失时才回退 qoder_catalog.py 内嵌的冻结副本并打印 WARNING）
 ```
 
@@ -244,7 +244,7 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 
 - **按"人"去重（实测）**：官方文档写"每账号每轮限领一次"，但**服务端实际按"人"执行**——同一台机器（相同 machineToken/Type/Code，与 account 参数无关）上的所有账号被合并为一人；任何一个号领了本轮，其他号领取返回 `status=BLOCKED + failureCode=SAME_PERSON_ALREADY_CLAIMED`，且列表里连活动都不显示。网关如实识别这种状态（不计为成功、不虚报积分，日志给出"同人已领取"说明）；
 - > 因此「注册了几个号都没有新人 300 / 没有签到活动」的常见原因：① 跑在**虚拟机/云桌面**里（新人 300 明确不参与，活动也可能被风控过滤）；② **同用户批量注册**——第一个号拿走试用后，其余号会被冻结；③ 只注册了网页账号、**没登录过最新版桌面客户端**（300 在首次登录客户端时发）；④ 同一台机器上**别的账号本轮已经领过**（按人去重）；⑤ 活动是**成就门控**（需在官方桌面端完成对应任务）；
-- **本机虚拟化检测**：看板「签到与福利中心 · 本机虚拟化检测」卡片与 `GET /diag/vm` 展示官方风控桥 `vmInfo` 判定（是否虚拟机/平台/风险评分）+ 本机交叉校验证据（CPU 型号、系统制造商、虚拟化驱动、VBS/HVCI）。注意：开了 VBS/内核隔离的**实体机** isVm 可能误报；`python _diag_campaign.py` 一次性输出上述全部体检信息（只读不领取）。
+- **本机虚拟化检测**：看板「签到与福利中心 · 本机虚拟化检测」卡片与 `GET /diag/vm` 展示官方风控桥 `vmInfo` 判定（是否虚拟机/平台/风险评分）+ 本机交叉校验证据（CPU 型号、系统制造商、虚拟化驱动、VBS/HVCI）。注意：开了 VBS/内核隔离的**实体机** isVm 可能误报；`python scripts/_diag_campaign.py` 一次性输出上述全部体检信息（只读不领取）。
 
 ### 4. 后台常驻定时调度器 (Scheduler)
 
@@ -314,7 +314,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 
 ## 五、看板与接口一览
 
-访问 `http://127.0.0.1:8790/` 即可使用集成看板，核心接口：
+访问 `http://127.0.0.1:8790/` 即可使用集成看板（Next.js 静态产物，构建方式见第六节），核心接口：
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -345,41 +345,75 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 # BLOCKED）、成就门控任务行、虚拟化状态映射、版本检测三态、面板短缓存命中/失效、
 # DeepSeek reasoning_content 回填与 flatten 保留、请求体、信封解包、custom 工具转译、
 # 本机凭证扫描、券类兑换码落盘/中文活动名/全部账号聚合/信封层 403-10605 冷却）
-python _test_qoder.py
+python tests/test_qoder.py
+
+# 前端静态托管的安全与路由判定（目录穿越、接口/页面同名的尾斜杠约定）
+python tests/test_static.py
 
 # 直接启动
-python qoder_proxy.py --port 8790
+python qoder_proxy.py --port 8790     # 等价入口：python -m qoder2api
 
 # 活动资格与新人权益自检（为什么某个账号没有签到/没有新人 300；只读不领取）
-python _diag_campaign.py            # 体检全部账号
-python _diag_campaign.py --uid XX   # 只看某个账号（uid 前缀）
+python scripts/_diag_campaign.py            # 体检全部账号
+python scripts/_diag_campaign.py --uid XX   # 只看某个账号（uid 前缀）
 
 # 客户端更新后刷新官方模型快照（解密本机客户端目录缓存 → 双区 JSON 快照，
 # 并打印价格/上下文/思考档位的变化摘要；--dry-run 只看差异不写文件）
-python _refresh_catalog.py
+python scripts/_refresh_catalog.py
 
 # 端到端模型库/能力清单验证（网关运行中执行；逐模型对比官方"此刻"数据：
 # id/enable/峰谷价/上下文窗口/思考档位/官方介绍/禁用原因/不编造字段/低谷判定）
 #   基准 = 官方动态接口优先（与桌面版选择器同源），本机目录按字段兜底
-python _verify_models.py --base http://127.0.0.1:8790
+python scripts/_verify_models.py --base http://127.0.0.1:8790
 #   347 项断言；退出码 0=全部一致；1=存在差异（打印逐条 FAIL 明细）；2=网关不可达
+
+# 前端开发（需要 Node；只在改前端时用，最终用户不需要）
+cd web && npm install
+npm run dev            # 开发服务器 :3000，API 反向代理到 :8790
+npm run build:export   # 产出 web/out（产物已入库；重建后请一并提交）
 ```
 
-模块结构：
+目录结构：
+
+```
+qoder2api-hub/
+├─ qoder_proxy.py         # 兼容入口（等价 python -m qoder2api）
+├─ qoder2api/             # 后端包（纯标准库，零第三方依赖）
+│  ├─ cli.py paths.py runtime.py            # 入口 / 路径 / 可变运行态
+│  ├─ security.py auth.py realm.py          # 鉴权、CORS、区域路由
+│  ├─ usage.py views.py logbus.py           # 用量统计、面板视图、日志总线
+│  ├─ models.py model_entry.py catalog.py   # 模型目录与逐字段元数据
+│  ├─ body.py sanitize.py reasoning.py chat_normalize.py  # 请求构建与归一化
+│  ├─ upstream.py responses.py              # 上游调用/重试/SSE、Responses 转换
+│  ├─ accounts.py tasks.py scheduler.py settings.py net.py sign.py fingerprint.py
+│  ├─ assets/             # baseprompt.json + 双区模型快照 JSON
+│  └─ api/                # HTTP 层：base(公共) + routes_get/post + 各业务路由
+├─ tests/                 # test_qoder.py（离线确定性）、test_static.py
+├─ scripts/               # _diag_gateway / _diag_campaign / _refresh_catalog / _verify_models
+├─ web/                   # 前端（Next.js 15 + React 19 + TS + Tailwind v4 + shadcn/ui）
+│  └─ out/                # 构建产物（入库；后端直接托管，最终用户无需 Node）
+├─ legacy/dashboard.html  # 迁移期旧看板（挂在 /legacy；下个版本删除）
+├─ accounts/  usage/      # 运行时数据（位置不变；默认路径即仓库根）
+└─ docs/  Dockerfile  docker-compose.yml  *.bat
+```
+
+后端模块职责：
 
 | 文件 | 职责 |
 |---|---|
-| `qoder_proxy.py` | 主网关：HTTP 路由、COSY 数据面、双协议转换、用量统计、看板鉴权 |
-| `qoder_sign.py` | 自定义 Base64、纯库 AES-128/256 + GCM、RSA、DPAPI、QMC 解密、COSY 签名 |
-| `qoder_accounts.py` | 双区账号池、OAuth 设备流、PAT、Token 生命周期、**本机凭证扫描/导入** |
-| `qoder_catalog.py` | 双区官方模型快照加载（外部 JSON 优先，内嵌冻结副本兜底）、别名与独占表 |
-| `qoder_catalog_intl.json` / `qoder_catalog_cn.json` | 双区官方模型快照（客户端 catalog 逐字段原样导出，`_refresh_catalog.py` 刷新） |
-| `qoder_tasks.py` | 签到闭环（含 DISABLED 归一化）、Pro 福利包、批量执行、保活巡检 |
-| `qoder_scheduler.py` | 整点排程调度器（09/21 签到 · 22:00 保活，签到能力运行时探测） |
-| `qoder_settings.py` | 面板密码 (PBKDF2)、多 API Key 出口绑定、会话管理 |
-| `qoder_fingerprint.py` | UID 稳定设备指纹派生 (derive_id) |
-| `baseprompt.json` | 官方推理请求体模板 |
-| `dashboard.html` | 单文件 Web 看板（本地凭证两步扫描导入 + PAT 导入） |
+| `qoder2api/cli.py` | 命令行入口：参数解析、账号池装配、HTTP 服务启动 |
+| `qoder2api/api/*` | HTTP 路由、SSE 输出、面板鉴权、静态产物托管 |
+| `qoder2api/upstream.py` | 上游调用：COSY 签名请求、账号租约、信封重试/冷却、SSE 心跳 |
+| `qoder2api/responses.py` | Responses API ↔ Chat Completions 双向转换 |
+| `qoder2api/body.py` / `sanitize.py` / `reasoning.py` / `chat_normalize.py` | 请求体构建与各类归一化 |
+| `qoder2api/models.py` / `model_entry.py` | 双区模型清单与逐字段元数据 |
+| `qoder2api/catalog.py` + `assets/*.json` | 官方模型快照（外部 JSON 优先，内嵌冻结副本兜底） |
+| `qoder2api/accounts.py` | 双区账号池、OAuth 设备流、PAT、Token 生命周期、本机凭证扫描/导入 |
+| `qoder2api/tasks.py` / `scheduler.py` | 签到闭环、Pro 福利包、整点排程 |
+| `qoder2api/settings.py` / `net.py` / `security.py` | 面板密码与多 API Key、出站代理层、CORS/鉴权 |
+| `qoder2api/sign.py` / `fingerprint.py` | 纯标准库 AES/RSA/DPAPI/QMC 与 COSY 签名、设备指纹派生 |
+| `qoder2api/usage.py` / `views.py` / `logbus.py` | 用量统计、面板视图、看板日志总线 |
+| `web/` | 前端源码（Next.js 15 + shadcn/ui；产物 `web/out` 由后端托管） |
 
 ---
 

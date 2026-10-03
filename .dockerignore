@@ -12,3 +12,12 @@ temp_*
 _acc
 _use
 .DS_Store
+
+# 前端源码与构建中间产物（镜像只需要 web/out 的静态产物）
+web/*
+!web/out
+
+# 测试与开发脚本不进镜像
+tests/
+scripts/
+docs/
