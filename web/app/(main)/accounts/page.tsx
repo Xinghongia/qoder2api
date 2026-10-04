@@ -14,7 +14,6 @@ import {
   type CreditsMeta,
 } from '@/components/common/gateway/AccountTable';
 import {GrowthTasksPanel} from '@/components/common/gateway/GrowthTasksPanel';
-import {VmStatusCard} from '@/components/common/gateway/VmStatusCard';
 import {api} from '@/lib/api';
 import {useAddAccount} from '@/lib/add-account-context';
 import {notify} from '@/lib/toast';
@@ -261,7 +260,6 @@ export default function AccountsPage() {
       )}
 
       <GrowthTasksPanel realm={view} onChanged={loadList} />
-      <VmStatusCard realm={view} />
     </div>
   );
 }
