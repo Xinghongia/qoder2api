@@ -4293,5 +4293,34 @@ check("行内动作原地刷新（onChanged 只重拉列表，不整页重载）
       "await onChanged();" in _tbl40)
 
 print()
+print("[41] 免费模型计费口径（billable=false -> 0 积分）+ 测试按钮固定 Qwen3.8-Flash")
+# 上游对免费模型（Qwen3.8-Flash，price_factor=0）会把"名义成本"照常写进
+# credits，同时给 billable=false —— 实测 2026-10-04 国际版 Free 账号
+# （额度 0/0）响应用量块 {"billable": false, "credits": 0.1027}，请求成功、
+# 额度分文未动。照抄 credits 会把免费调用记成消耗（统计虚增）。
+check("billed_credit：billable=false 时实扣积分为 0（忽略名义 credits）",
+      usage_mod.billed_credit({"billable": False, "credits": 0.1027675}) == 0.0)
+check("billed_credit：billable=true / 缺字段照常取 credits",
+      usage_mod.billed_credit({"billable": True, "credits": 0.5}) == 0.5
+      and usage_mod.billed_credit({"credits": 0.25}) == 0.25
+      and usage_mod.billed_credit({"credit": 0.125}) == 0.125
+      and usage_mod.billed_credit(None) == 0.0)
+_u41 = usage_mod._extract_usage({"total_tokens": 2637, "billable": False,
+                                 "credits": 0.1027675})
+check("_extract_usage 的 credit 走 billed_credit（免费请求记 0）",
+      (_u41.get("credit") or 0) == 0.0 and _u41.get("total_tokens") == 2637, _u41)
+check("/accounts/test 回报实扣积分与 billable（面板据此显示「0 积分（免费）」）",
+      "billed_credit(usage_block)" in _src35
+      and '"credits": billed_credit(usage_block)' in _src35
+      and '"billable": usage_block.get("billable")' in _src35)
+check("api.accounts.test 支持指定模型",
+      "test: (uid: string, model?: string)" in open(
+          os.path.join(_ROOT, "web", "lib", "api.ts"), encoding="utf-8").read())
+check("测试按钮固定测 Qwen3.8-Flash（双区都有、官方免费模型）",
+      "const TEST_MODEL = 'Qwen3.8-Flash';" in _tbl40
+      and "api.accounts.test(row.uid, TEST_MODEL)" in _tbl40
+      and "0 积分（免费）" in _tbl40)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

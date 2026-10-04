@@ -220,7 +220,10 @@ export const api = {
       }),
     checkin: (uid?: string) => http.post('/accounts/checkin', uid ? {uid} : {}),
     refresh: (uid?: string) => http.post('/accounts/refresh', uid ? {uid} : {}),
-    test: (uid: string) => http.post('/accounts/test', {uid}),
+    // 连通测试：默认测 Qwen3.8-Flash（免费模型、0 积分）——额度耗尽的账号
+    // 也能用它验证"这个号还能不能用"；传 model 可测其它模型。
+    test: (uid: string, model?: string) =>
+      http.post('/accounts/test', model ? {uid, model} : {uid}),
     set: (uid: string, patch: Record<string, unknown>) => http.post('/accounts/set', {uid, ...patch}),
     setAll: (patch: Record<string, unknown>) => http.post('/accounts/set-all', patch),
     remove: (uid: string) => http.post('/accounts/delete', {uid}),

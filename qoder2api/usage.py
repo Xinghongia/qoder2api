@@ -33,6 +33,26 @@ def _empty_stats():
 _usage = _empty_stats()
 
 
+def billed_credit(usage):
+    """一次响应的**实际**计费积分（上游用量块）。
+
+    关键：上游对免费模型（如 Qwen3.8-Flash，price_factor=0）会把"名义成本"
+    照常写进 credits 字段，同时给出 `billable: false` —— 实测 2026-10-04
+    国际版 Free 账号（额度 0/0、isQuotaExceeded=true）：响应用量块为
+    `{"billable": false, "credits": 0.1027}`，请求成功且额度分文未动。
+    照抄 credits 会把免费调用记成"消耗积分"（统计虚增）；只有显式
+    `billable: false` 才清零，字段缺失/为真时照常取值。
+    """
+    if not usage:
+        return 0.0
+    if usage.get("billable") is False:
+        return 0.0
+    try:
+        return float(usage.get("credits") or usage.get("credit") or 0)
+    except Exception:
+        return 0.0
+
+
 def _extract_usage(usage):
     """Normalize the upstream usage block into the fields we track."""
     if not usage:
@@ -49,7 +69,8 @@ def _extract_usage(usage):
         # 上游用量块里的计费字段是**复数** credits（实测：
         # {"credits":0.1427...,"original_credits":0.1427...}）；老版本/其它
         # 形态若发单数 credit 也接受。此前只读单数，导致积分统计恒为 0。
-        "credit": usage.get("credits") or usage.get("credit") or 0,
+        # 免费模型（billable=false）不计费 -> 见 billed_credit。
+        "credit": billed_credit(usage),
     }
 
 

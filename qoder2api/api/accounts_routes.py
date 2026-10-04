@@ -17,6 +17,7 @@ from ..views import account_views
 from ..realm import acc_realm, save_persisted_realm
 from ..upstream import (RateLimited, aggregate_stream)
 from ..tasks import CHECKIN_MIN_GAP
+from ..usage import billed_credit
 from ..logbus import clear_logs
 
 
@@ -281,12 +282,20 @@ class AccountsRoutesMixin(object):
                 if len(reply_text) > 80:
                     reply_text = reply_text[:77] + "..."
                 account.clear_error()
-                log("account test: uid=%s model=%s wall=%dms ok=True"
-                    % (account.uid[:8], test_model, wall_ms), tag="accounts")
+                # 用量块一并回报：调免费模型（Qwen3.8-Flash）时 billable=false、
+                # 实扣积分为 0，面板据此显示「0 积分（免费）」，不虚报消耗。
+                usage_block = chat_obj.get("usage") or {}
+                log("account test: uid=%s model=%s wall=%dms ok=True credits=%s"
+                    % (account.uid[:8], test_model, wall_ms,
+                       billed_credit(usage_block)), tag="accounts")
                 return self._json(200, {"ok": True, "uid": account.uid,
                                         "model": test_model,
                                         "elapsed_ms": wall_ms,
-                                        "reply": reply_text})
+                                        "reply": reply_text,
+                                        "credits": billed_credit(usage_block),
+                                        "billable": usage_block.get("billable")
+                                        is not False,
+                                        "total_tokens": usage_block.get("total_tokens") or 0})
             except RateLimited as exc:
                 wall_ms = int((time.time() - t0) * 1000)
                 return self._json(200, {"ok": False, "uid": account.uid,

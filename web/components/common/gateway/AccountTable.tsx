@@ -132,6 +132,9 @@ const TONE_BADGE: Record<Tone, string> = {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** 「测试」按钮固定的连通测试模型：双区都有的官方免费模型（0 积分）。 */
+const TEST_MODEL = 'Qwen3.8-Flash';
+
 function fmt(n: number | null | undefined): string {
   return (n ?? 0).toLocaleString('en-US');
 }
@@ -253,20 +256,33 @@ export function AccountTable({
       await onCheckin(row.uid);
     });
 
+  /**
+   * 连通测试统一用 Qwen3.8-Flash（双区都有、官方 `is_free`、price_factor=0）：
+   * 额度耗尽的 Free 账号调计费模型必然 403，但免费模型仍可用——用它测才能
+   * 回答"这个号还能不能用"，而不是把"没额度"误报成"号废了"。
+   */
   const testOne = (row: AccountRow) =>
     runRow(`test:${row.uid}`, async () => {
-      const r = (await api.accounts.test(row.uid)) as {
+      const r = (await api.accounts.test(row.uid, TEST_MODEL)) as {
         ok?: boolean;
         model?: string;
         elapsed_ms?: number;
         reply?: string;
         error?: string;
         status?: number;
+        credits?: number;
+        billable?: boolean;
+        total_tokens?: number;
       };
       if (r?.ok) {
+        // 顺带显示本次实扣积分：免费模型显示「0 积分（免费）」，计费模型给数值
+        const credit = r.billable === false || !r.credits
+          ? '0 积分（免费）'
+          : `${r.credits.toFixed(4)} 积分`;
         notify.ok(
           '连通正常',
-          `${r.elapsed_ms ?? '?'}ms · ${r.model || 'auto'}${r.reply ? ` · ${r.reply}` : ''}`,
+          `${r.elapsed_ms ?? '?'}ms · ${r.model || TEST_MODEL} · ${credit}` +
+            `${r.reply ? ` · ${r.reply}` : ''}`,
         );
       } else {
         notify.err('连通测试失败', String(r?.error || r?.status || '未知错误'));
@@ -678,7 +694,7 @@ export function AccountTable({
                         size="sm"
                         className="h-7 rounded-full px-2 text-xs"
                         disabled={isPending(row.uid, 'test')}
-                        title="向该账号发一条测试请求"
+                        title="向该账号发一条 Qwen3.8-Flash（免费模型，0 积分）测试请求"
                         onClick={() => testOne(row)}
                       >
                         {isPending(row.uid, 'test') ? (

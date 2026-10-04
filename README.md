@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.10-2496ED?style=flat-square" alt="Version 1.2.10">
+  <img src="https://img.shields.io/badge/Release-v1.2.11-2496ED?style=flat-square" alt="Version 1.2.11">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -436,6 +436,15 @@ qoder2api-hub/
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.11
+
+**测试按钮改测免费模型 Qwen3.8-Flash + 免费调用不再虚增积分统计（billable=false）**
+
+- **「测试」按钮固定用 `Qwen3.8-Flash`**（双区都有的官方免费模型，`is_free`、`price_factor=0`）：额度耗尽的 Free 账号调计费模型必然 403，但免费模型仍可用——用计费模型测会把"没额度"误报成"账号废了"。测试结果顺带显示**本次实扣积分**（免费模型显示「0 积分（免费）」），一眼分清"能用但没额度"与"真的连不上"。
+- **免费调用不再虚增积分**：上游对免费模型会把**名义成本**照常写进用量块的 `credits` 字段，同时给 `billable: false`（实测 2026-10-04 国际版 Free 账号：额度 0/0、`{"billable":false,"credits":0.1027}`，请求成功且额度分文未动）。此前统计照抄 `credits`，会把免费调用记成"消耗积分"；现在 `billable: false` 一律记 0（`usage.billed_credit()`），字段缺失/为真时照常取值。
+- **顺带解释一个易误判现象**：国际版账号推理返回 `upstream status 403`（信封 `code=112`、body 带 `pricingUrl`）是**额度不足**（Free 计划额度 0/0、`isQuotaExceeded=true`），不是风控——同一账号在同一时刻查询额度/套餐接口都正常，且用免费模型推理成功。网关风控的真实表现是静默过滤活动列表，不是推理 403。
+- 测试：628 PASS / 0 FAIL（新增 [41] 组 6 条：billable 三态、路由回报、测试按钮模型断言）。
 
 ### v1.2.10
 
