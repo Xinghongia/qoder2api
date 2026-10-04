@@ -40,7 +40,10 @@ import {cn} from '@/lib/utils';
 /**
  * 账号表格（「网关与运维」页）。
  *
- * 行为基准是旧看板 dashboard.html：
+ * 行为基准是旧看板 dashboard.html，视觉基准是 workbuddy 管理面板的账号表：
+ *   · 账号列 = 头像 + 昵称 + 区域徽章 + uid/来源（不再单占一列"区域"）；
+ *   · 积分列标注**数据来源**（实时 / 缓存 N 秒 / 快照）——快照值不涂红，
+ *     "快照说 0"不等于"确实没额度"，不能当故障报警（workbuddy issue #56 同款口径）；
  *   · 行内动作全部是单账号入口；批量动作（卡片头部）都必须同时有行内入口
  *     ——历史事故：批量签到后列表被切到另一个区域，用户找不到原来那行；
  *   · 动作完成后只调用 onChanged() 原地刷新，不整页重载、不改变当前区域。
@@ -55,6 +58,20 @@ export interface AccountCredits {
   usage_pct?: number | null;
   updated_at?: number;
   updated_iso?: string;
+  packages?: Array<{name?: string; remain?: number; used?: number; size?: number}>;
+}
+
+/**
+ * 一次额度刷新的来源标注（页面把 /accounts/credits 的 results 转成 uid -> meta）：
+ *   ok=false    —— 本次刷新失败，界面继续显示旧快照；
+ *   cached=true —— 服务端 TTL 命中（快照 age 秒前拉的），未打上游；
+ *   其余        —— 本次实时拉到（绿色「实时」）。
+ */
+export interface CreditsMeta {
+  ok: boolean;
+  cached: boolean;
+  age: number;
+  error?: string;
 }
 
 /** 后端 Account.public()（qoder2api/accounts.py）的返回形状。 */
@@ -113,11 +130,6 @@ const TONE_BADGE: Record<Tone, string> = {
   muted: 'border-border/60 text-muted-foreground',
 };
 
-const REALM_BADGE: Record<string, string> = {
-  intl: 'border-sky-600/30 bg-sky-600/10 text-sky-700 dark:text-sky-400',
-  cn: 'border-red-600/30 bg-red-600/10 text-red-700 dark:text-red-400',
-};
-
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 function fmt(n: number | null | undefined): string {
@@ -155,15 +167,58 @@ function stateOf(row: AccountRow): {text: string; className: string} {
   return {text: '可用', className: TONE_BADGE.ok};
 }
 
+/** 积分来源徽标：实时（绿）/ 缓存 N 秒（琥珀）/ 快照（灰，不报警）。 */
+function creditSourceBadge(meta: CreditsMeta | undefined) {
+  const base = 'rounded-full px-1.5 py-0.5 text-[10px] leading-3';
+  if (meta?.ok && !meta.cached) {
+    return (
+      <span
+        className={cn(base, 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400')}
+        title="本次实时向上游查询的余额"
+      >
+        实时
+      </span>
+    );
+  }
+  if (meta?.ok && meta.cached) {
+    return (
+      <span
+        className={cn(base, 'bg-amber-500/15 text-amber-600 dark:text-amber-400')}
+        title={`服务端缓存命中（快照 ${meta.age} 秒前拉的），本次未打上游`}
+      >
+        缓存 {meta.age}s
+      </span>
+    );
+  }
+  return (
+    <span
+      className={cn(base, 'bg-muted-foreground/10 text-muted-foreground')}
+      title={
+        meta && !meta.ok
+          ? `本次刷新失败${meta.error ? `：${meta.error}` : ''}，显示上一次的快照值`
+          : '上游快照（进入页面会自动刷新）；快照值不参与是否耗尽的判断'
+      }
+    >
+      快照
+    </span>
+  );
+}
+
 export function AccountTable({
   rows,
   busy,
+  creditsMeta,
+  roundPending,
   onCheckin,
   onChanged,
 }: {
   rows: AccountRow[];
   /** 正在执行签到动作的 uid，或 'all'，或 ''。 */
   busy: string;
+  /** 额度来源标注（uid -> 本次刷新的结果），缺省时积分列显示「快照」。 */
+  creditsMeta?: Record<string, CreditsMeta>;
+  /** 活动平台的「本轮已签到」状态还在路上（首屏）：表头给一行进行中提示。 */
+  roundPending?: boolean;
   onCheckin: (uid?: string) => Promise<void>;
   onChanged: () => Promise<void> | void;
 }) {
@@ -337,6 +392,9 @@ export function AccountTable({
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 pb-2 pt-3">
         <div className="text-[11px] text-muted-foreground">
           共 {rows.length} 个 · 启用 {enabledCount} · 冷却 {coolingCount} · 待签到 {checkinCount}
+          {roundPending && (
+            <span className="ml-2 opacity-70">签到状态同步中…</span>
+          )}
           <span className="ml-2 hidden opacity-70 sm:inline">
             所有操作原地生效，不会切换区域
           </span>
@@ -397,16 +455,13 @@ export function AccountTable({
               账号
             </TableHead>
             <TableHead className="text-[11px] font-normal text-muted-foreground">
-              区域
+              状态
             </TableHead>
             <TableHead className="text-[11px] font-normal text-muted-foreground">
-              套餐 / 额度
+              积分
             </TableHead>
             <TableHead className="text-[11px] font-normal text-muted-foreground">
               有效期
-            </TableHead>
-            <TableHead className="text-[11px] font-normal text-muted-foreground">
-              状态
             </TableHead>
             <TableHead className="pr-4 text-right text-[11px] font-normal text-muted-foreground">
               操作
@@ -416,7 +471,7 @@ export function AccountTable({
         <TableBody>
           {rows.length === 0 ? (
             <TableRow className="border-0 hover:bg-transparent">
-              <TableCell colSpan={6} className="py-10 text-center text-xs text-muted-foreground">
+              <TableCell colSpan={5} className="py-10 text-center text-xs text-muted-foreground">
                 暂无账号
               </TableCell>
             </TableRow>
@@ -432,19 +487,83 @@ export function AccountTable({
               const needsCheckin =
                 !roundClaimed && row.enabled && row.canCheckin !== false;
               const cred = row.credits || null;
-              const exhausted =
-                cred?.exceeded === true ||
-                (!!cred && (cred.size ?? 0) > 0 && (cred.remain ?? 0) <= 0);
+              const meta = creditsMeta?.[row.uid];
+              // 只有「本次确实刷新成功」（实时或 TTL 内的缓存）才按金额涂色报警；
+              // 快照（含刷新失败）一律灰字——"快照说 0"不等于"确实没额度"。
+              const live = meta?.ok === true;
+              const exhausted = live
+                && (cred?.exceeded === true
+                    || (!!cred && (cred.size ?? 0) > 0 && (cred.remain ?? 0) <= 0));
+              const low = live && !exhausted && (cred?.remain ?? 0) < 200;
+              const expired = row.expiresIn === 'expired';
               return (
                 <TableRow
                   key={row.uid}
                   className={cn('border-b border-border/40', !row.enabled && 'opacity-70')}
                 >
-                  <TableCell className="pl-4 align-top">
+                  <TableCell className="pl-4">
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={cn(
+                          'grid size-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold',
+                          expired || !row.enabled
+                            ? 'bg-muted-foreground/20 text-muted-foreground'
+                            : 'bg-primary text-primary-foreground',
+                        )}
+                      >
+                        {(row.nickname || '?').charAt(0)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span
+                            className={cn(
+                              'max-w-[180px] truncate text-sm font-medium',
+                              expired && 'text-muted-foreground',
+                            )}
+                          >
+                            {row.nickname || uid8(row.uid)}
+                          </span>
+                          <Badge
+                            variant="secondary"
+                            className={cn(
+                              'shrink-0 rounded-md px-1.5 py-0 text-[10px]',
+                              row.realm === 'intl'
+                                ? 'bg-sky-600/10 text-sky-700 dark:text-sky-400'
+                                : 'bg-red-600/10 text-red-700 dark:text-red-400',
+                            )}
+                          >
+                            {row.realm === 'cn' ? '国内版' : '国际版'}
+                          </Badge>
+                        </div>
+                        <div
+                          className="font-mono text-[10px] text-muted-foreground"
+                          title={row.machineId ? `设备码 ${row.machineId}` : undefined}
+                        >
+                          {uid8(row.uid)} · {row.source || '未知来源'}
+                          {row.tokenFamily ? ` · ${row.tokenFamily}` : ''}
+                        </div>
+                        {row.machineId && (
+                          <div className="font-mono text-[10px] text-muted-foreground/70">
+                            设备码 {row.machineId.slice(0, 14)}…
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </TableCell>
+
+                  <TableCell>
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-sm font-medium">
-                        {row.nickname || uid8(row.uid)}
-                      </span>
+                      <Badge
+                        variant="outline"
+                        className={cn('rounded-full text-[11px]', state.className)}
+                        title={
+                          row.consecutiveFailures > 1
+                            ? `连续失败 ${row.consecutiveFailures} 次`
+                            : undefined
+                        }
+                      >
+                        {state.text}
+                      </Badge>
                       {needsCheckin && (
                         <Badge
                           variant="outline"
@@ -463,87 +582,6 @@ export function AccountTable({
                         </Badge>
                       )}
                     </div>
-                    <div
-                      className="font-mono text-[11px] text-muted-foreground"
-                      title={row.machineId ? `设备码 ${row.machineId}` : undefined}
-                    >
-                      {uid8(row.uid)} · {row.source || '未知来源'}
-                      {row.tokenFamily ? ` · ${row.tokenFamily}` : ''}
-                    </div>
-                    {row.machineId && (
-                      <div className="font-mono text-[10px] text-muted-foreground/70">
-                        设备码 {row.machineId.slice(0, 14)}…
-                      </div>
-                    )}
-                  </TableCell>
-
-                  <TableCell className="align-top">
-                    <Badge
-                      variant="outline"
-                      className={cn('rounded-full text-[11px]', REALM_BADGE[row.realm])}
-                    >
-                      {row.realm === 'cn' ? '国内版' : '国际版'}
-                    </Badge>
-                  </TableCell>
-
-                  <TableCell className="align-top">
-                    {row.plan ? (
-                      <Badge variant="secondary" className="rounded-full text-[10px]">
-                        {row.plan}
-                      </Badge>
-                    ) : null}
-                    {cred ? (
-                      <div
-                        className="mt-1 text-xs tabular-nums"
-                        title={cred.updated_iso ? `更新于 ${cred.updated_iso}` : undefined}
-                      >
-                        <b
-                          className={cn(
-                            exhausted
-                              ? 'text-red-600 dark:text-red-400'
-                              : 'text-emerald-600 dark:text-emerald-400',
-                          )}
-                        >
-                          {fmt(cred.remain)}
-                        </b>
-                        <span className="text-muted-foreground"> / {fmt(cred.size)}</span>
-                        {exhausted && (
-                          <span className="ml-1 text-[10px] text-red-600 dark:text-red-400">
-                            已耗尽
-                          </span>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="mt-1 text-xs text-muted-foreground">未查询</div>
-                    )}
-                  </TableCell>
-
-                  <TableCell className="align-top">
-                    <span
-                      className={cn(
-                        'text-xs tabular-nums',
-                        exp.tone === 'ok' && 'text-foreground',
-                        exp.tone === 'warning' && 'text-amber-600 dark:text-amber-400',
-                        exp.tone === 'danger' && 'text-red-600 dark:text-red-400',
-                        exp.tone === 'muted' && 'text-muted-foreground',
-                      )}
-                    >
-                      {exp.text}
-                    </span>
-                  </TableCell>
-
-                  <TableCell className="align-top">
-                    <Badge
-                      variant="outline"
-                      className={cn('rounded-full text-[11px]', state.className)}
-                      title={
-                        row.consecutiveFailures > 1
-                          ? `连续失败 ${row.consecutiveFailures} 次`
-                          : undefined
-                      }
-                    >
-                      {state.text}
-                    </Badge>
                     {row.lastError && (
                       <div
                         className="mt-1 max-w-[220px] truncate text-[10px] text-amber-600 dark:text-amber-400"
@@ -557,6 +595,65 @@ export function AccountTable({
                         最近签到 {row.lastCheckin}
                       </div>
                     )}
+                  </TableCell>
+
+                  <TableCell>
+                    {row.plan ? (
+                      <Badge variant="secondary" className="rounded-full text-[10px]">
+                        {row.plan}
+                      </Badge>
+                    ) : null}
+                    {cred ? (
+                      <div
+                        className={cn('text-xs tabular-nums', row.plan && 'mt-1')}
+                        title={[
+                          cred.updated_iso ? `快照更新于 ${cred.updated_iso}` : '',
+                          ...(cred.packages || [])
+                            .filter((p) => p.name)
+                            .map((p) => `${p.name} ${fmt(p.remain)}/${fmt(p.size)}`),
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || undefined}
+                      >
+                        <span className="inline-flex items-center gap-1.5">
+                          <span
+                            className={cn(
+                              'font-medium',
+                              exhausted && 'text-red-600 dark:text-red-400',
+                              low && 'text-amber-600 dark:text-amber-400',
+                              live && !exhausted && !low
+                                && 'text-emerald-600 dark:text-emerald-400',
+                              !live && 'text-muted-foreground',
+                            )}
+                          >
+                            {fmt(cred.remain)}
+                          </span>
+                          <span className="text-muted-foreground">/ {fmt(cred.size)}</span>
+                          {creditSourceBadge(meta)}
+                        </span>
+                        {exhausted && (
+                          <span className="ml-1 text-[10px] text-red-600 dark:text-red-400">
+                            已耗尽
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-xs text-muted-foreground">未查询</div>
+                    )}
+                  </TableCell>
+
+                  <TableCell>
+                    <span
+                      className={cn(
+                        'text-[11px] font-medium tabular-nums',
+                        exp.tone === 'ok' && 'text-foreground',
+                        exp.tone === 'warning' && 'text-amber-600 dark:text-amber-400',
+                        exp.tone === 'danger' && 'text-red-600 dark:text-red-400',
+                        exp.tone === 'muted' && 'text-muted-foreground',
+                      )}
+                    >
+                      {exp.text}
+                    </span>
                   </TableCell>
 
                   <TableCell className="pr-4 align-top text-right">

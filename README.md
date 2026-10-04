@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.9-2496ED?style=flat-square" alt="Version 1.2.9">
+  <img src="https://img.shields.io/badge/Release-v1.2.10-2496ED?style=flat-square" alt="Version 1.2.10">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -330,6 +330,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | POST | /accounts/login/start | 发起 OAuth 设备授权 |
 | POST | /accounts/import/pat | 导入 PAT 令牌 |
 | POST | /accounts/checkin | 手动每日签到（单个/全部；只领 Credits 类，不动券类） |
+| POST | /accounts/credits | 刷新额度快照（`uid=` 单账号，缺省全部；`ttl=` 秒 = 快照比它新则直接返回 `cached=true`，页面自动刷新用 60，手动刷新不传） |
 | GET | /accounts/checkin-state | 各账号「本轮已签到」状态（活动平台判定，账号表徽标用；`realm=` 可选） |
 | GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
 | GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
@@ -435,6 +436,17 @@ qoder2api-hub/
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.10
+
+**账号页对齐 workbuddy 面板：进页面秒开不白屏 + 列表 30 秒自动刷新 + 积分来源标注**
+
+- **进页面/刷新不再"什么都看不到"**：此前账号页用 `Promise.all` 把三条链路绑在一起等最慢的一条（活动平台「本轮已签到」要 1–4 秒），期间整张表是骨架屏。现在**三条链路各走各的**：账号列表（本地接口，毫秒级）先渲染 → 签到状态到货后就地合并徽标（表头给一行「签到状态同步中…」）→ 额度在后台按服务端 TTL 补。骨架屏的判据改为"**确实没有任何数据**"而不是"请求在飞"，心跳刷新与再次进入页面（模块级缓存）都**不会**再闪骨架、更不会清空已显示的表格。
+- **自动保活/测活**：新增 `useHeartbeat`（对齐 workbuddy 的 30 秒心跳语义）——列表 30 秒自动重拉、签到状态 10 分钟（一轮只变一次，且上游活动平台每次都是真查询）；标签页隐藏时跳过、切回立即补一次。头部「刷新」按钮只在**手动**刷新时转圈，心跳与进入页面不转。
+- **额度刷新并行 + 服务端 TTL**：`POST /accounts/credits` 支持 `ttl`（秒）——进入页面的自动刷新传 60，快照比它新时服务端直接返回（`cached=true`、`age` 为快照年龄），**不打上游**；手动「刷新额度」不传，始终回源。多账号从串行改为并行取回（`refresh_credits`，上限 6 线程）——原来 10 个账号要 10 次串行往返。
+- **积分显示"精准且不唬人"**：积分列（`remain / size` + 套餐徽章）右侧标注**数据来源**——绿「实时」= 本次真查到；琥珀「缓存 Ns」= 服务端 TTL 命中；灰「快照」= 上游快照或本次刷新失败（悬停给出失败原因）。**只有实时/缓存值才按金额涂色**（0 红「已耗尽」、<200 琥珀）；快照值一律灰字——"快照说 0"不等于"确实没额度"，不能当故障报警（workbuddy issue #56 同款口径）。
+- **列表版式对齐 workbuddy**：账号列 = 圆头像 + 昵称 + 区域徽章 + uid/来源/设备码；「区域」「套餐 / 额度」「状态」三列合并为「状态」「积分」两列，操作列仍是七个单账号入口（签到 / 测试 / 刷新额度 / 刷新凭证 / 停用 / 导出 / 删除），全部原地生效。
+- 测试：622 PASS / 0 FAIL（新增 [40] 组 17 条：TTL 三态、并行调度、失败保留旧快照、心跳与分层加载静态断言、积分来源与不涂红口径）。
 
 ### v1.2.9
 

@@ -232,8 +232,9 @@ class GetRoutesMixin(object):
         if path == "/accounts/credits":
             if not self._authorized():
                 return
-            for a in (runtime.POOL.accounts if runtime.POOL else []):
-                a.fetch_credits()
+            # 旧客户端用的 GET 版本：语义等同手动刷新（始终回源），并行取回。
+            qoder_accounts.refresh_credits(
+                runtime.POOL.accounts if runtime.POOL else [])
             return self._json(200, {"accounts": account_views()})
         if path == "/accounts":
             if not self._authorized():

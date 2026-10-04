@@ -40,16 +40,15 @@ class AccountsRoutesMixin(object):
                 targets = [a for a in runtime.POOL.accounts if a.realm == realm]
             else:
                 targets = list(runtime.POOL.accounts)
-            results = []
-            for account in targets:
-                if account is None:
-                    continue
-                res = account.fetch_credits()
-                account.fetch_plan()
-                results.append({"uid": account.uid, "ok": res.get("ok", False),
-                                "credits": account.credits,
-                                "plan": account.plan,
-                                "error": res.get("error", "")})
+            # ttl=秒：看板进入页面时的自动刷新用它走服务端 TTL（快照够新就不回源，
+            # cached=True）；不传 = 手动刷新，始终回源。
+            max_age = None
+            if payload.get("ttl") is not None:
+                try:
+                    max_age = max(0.0, float(payload.get("ttl")))
+                except (TypeError, ValueError):
+                    max_age = None
+            results = qoder_accounts.refresh_credits(targets, max_age=max_age)
             # 手动刷新额度后，看板 /tasks 也看到新快照（不吃 20s 面板缓存）
             qoder_tasks.invalidate_panel_cache()
             return self._json(200, {"results": results,

@@ -211,7 +211,13 @@ export const api = {
       http.get(`/accounts/checkin-state${realm ? `?realm=${realm}` : ''}`),
     // 额度快照刷新：POST /accounts/credits 支持 {uid} 单账号 / {} 全部账号
     // （GET 版本忽略 realm 且无法指定 uid，与后端不一致，故改为 POST）。
-    credits: (uid?: string) => http.post('/accounts/credits', uid ? {uid} : {}),
+    // ttlSeconds：快照比它新时服务端直接返回缓存（cached=true）——进入页面
+    // 的自动刷新用它，避免反复打上游；手动刷新不传 = 始终回源。
+    credits: (uid?: string, ttlSeconds?: number) =>
+      http.post('/accounts/credits', {
+        ...(uid ? {uid} : {}),
+        ...(ttlSeconds != null ? {ttl: ttlSeconds} : {}),
+      }),
     checkin: (uid?: string) => http.post('/accounts/checkin', uid ? {uid} : {}),
     refresh: (uid?: string) => http.post('/accounts/refresh', uid ? {uid} : {}),
     test: (uid: string) => http.post('/accounts/test', {uid}),

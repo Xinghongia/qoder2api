@@ -1848,6 +1848,50 @@ class SessionAffinity(object):
 _ACTIVE_POOL = None
 
 
+def credits_age(account):
+    """额度快照的年龄（秒）；没有快照 / 时间戳坏掉返回 None。"""
+    try:
+        updated = float((account.credits or {}).get("updated_at") or 0)
+    except Exception:
+        return None
+    if updated <= 0:
+        return None
+    return max(0.0, time.time() - updated)
+
+
+def refresh_credits(accounts, max_age=None, workers=6):
+    """并行刷新一批账号的额度（需要时连套餐一起），返回逐账号结果。
+
+    max_age（秒）：额度快照比它新时**不回源**（cached=True，age 为快照年龄）
+    —— 看板每次进入账号页的自动刷新走这条（服务端 TTL），避免反复打上游；
+    None = 始终回源（手动「刷新额度」按钮的语义）。
+    账号多一些时逐个串行请求会明显变慢（每个一次上游往返），所以按
+    workbuddy 面板的做法并行取回（上限 workers 个线程）。
+    """
+    accounts = [a for a in accounts if a is not None]
+    if not accounts:
+        return []
+
+    def _one(account):
+        age = credits_age(account)
+        if max_age is not None and age is not None and age <= max_age:
+            return {"uid": account.uid, "ok": True, "cached": True,
+                    "age": round(age), "credits": account.credits,
+                    "plan": account.plan, "error": ""}
+        res = account.fetch_credits()
+        account.fetch_plan()
+        return {"uid": account.uid, "ok": bool(res.get("ok")),
+                "cached": False, "age": round(credits_age(account) or 0),
+                "credits": account.credits, "plan": account.plan,
+                "error": res.get("error", "")}
+
+    if len(accounts) == 1:
+        return [_one(accounts[0])]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(workers, len(accounts))) as ex:
+        return list(ex.map(_one, accounts))
+
+
 def add_to_pool(account):
     """把导入的账号写入活动账号池（AccountPool 构造时自注册）。"""
     if _ACTIVE_POOL is None:

@@ -4189,5 +4189,109 @@ check("转圈/等待反馈仍由 busy 表达（不能用它来禁用链接区块
       and "? `已等待 ${elapsed} 秒" in _oauth39)
 
 print()
+print("[40] 账号页秒开：额度并行 + TTL 缓存；前端分层加载与心跳（workbuddy 基准）")
+
+
+class _FakeAcc40(object):
+    """只测 refresh_credits 的调度逻辑，不碰网络。"""
+
+    def __init__(self, uid, credits=None, fail=False):
+        self.uid = uid
+        self.credits = credits
+        self.plan = "Pro"
+        self.calls = 0
+        self.fail = fail
+
+    def fetch_credits(self):
+        self.calls += 1
+        if self.fail:
+            return {"ok": False, "error": "boom"}
+        self.credits = {"remain": 100, "size": 500, "updated_at": time.time()}
+        return {"ok": True}
+
+    def fetch_plan(self):
+        pass
+
+
+_now40 = time.time()
+_fresh40 = _FakeAcc40("fresh", {"remain": 7, "size": 500, "updated_at": _now40})
+_r40a = A.refresh_credits([_fresh40], max_age=60)
+check("refresh_credits：TTL 内的快照不回源（cached=True, age 秒）",
+      _fresh40.calls == 0 and _r40a[0]["cached"] is True
+      and _r40a[0]["ok"] is True and _r40a[0]["age"] <= 1, _r40a)
+_stale40 = _FakeAcc40("stale", {"remain": 7, "size": 500,
+                                "updated_at": _now40 - 600})
+_r40b = A.refresh_credits([_stale40], max_age=60)
+check("refresh_credits：过期快照回源并标 cached=False",
+      _stale40.calls == 1 and _r40b[0]["cached"] is False
+      and (_stale40.credits or {}).get("remain") == 100, _r40b)
+_force40 = _FakeAcc40("force", {"remain": 1, "size": 500,
+                                "updated_at": time.time()})
+A.refresh_credits([_force40])          # max_age=None = 手动刷新，始终回源
+check("refresh_credits：手动刷新（max_age=None）始终回源",
+      _force40.calls == 1)
+_fail40 = _FakeAcc40("fail", {"remain": 3, "size": 500,
+                              "updated_at": _now40 - 600}, fail=True)
+_r40c = A.refresh_credits([_fail40], max_age=60)
+check("refresh_credits：刷新失败如实回报 ok=False 且保留旧快照",
+      _r40c[0]["ok"] is False and (_fail40.credits or {}).get("remain") == 3
+      and _r40c[0]["error"] == "boom", _r40c)
+check("refresh_credits：多账号并行取回（ThreadPoolExecutor）",
+      "ThreadPoolExecutor" in _src35 and "ex.map(_one, accounts)" in _src35)
+check("POST /accounts/credits 接受 ttl（页面自动刷新走 TTL，手动不传）",
+      'payload.get("ttl")' in _src35
+      and "refresh_credits(targets, max_age=max_age)" in _src35)
+check("GET /accounts/credits（旧客户端）也走并行刷新",
+      "qoder_accounts.refresh_credits(" in _src35
+      and 'for a in (runtime.POOL.accounts if runtime.POOL else []):\n                a.fetch_credits()' not in _src35)
+
+_hb40 = open(os.path.join(_ROOT, "web", "lib", "use-heartbeat.ts"),
+             encoding="utf-8").read()
+check("use-heartbeat：定时 + 隐藏跳过 + 切回即刷",
+      "window.setInterval(tick, ms)" in _hb40
+      and "document.hidden" in _hb40
+      and "visibilitychange" in _hb40)
+_page40 = open(os.path.join(_ROOT, "web", "app", "(main)", "accounts",
+                            "page.tsx"), encoding="utf-8").read()
+check("账号页三条链路各走各的（列表先渲染，签到状态/额度后合并）",
+      "const loadList = React.useCallback" in _page40
+      and "const loadRound = React.useCallback" in _page40
+      and "const loadCredits = React.useCallback" in _page40
+      and "api.accounts.checkinState()" in _page40
+      and "Promise.all([\n        api.accounts.list('all')," not in _page40)
+check("账号页心跳：列表 30s / 签到状态 10 分钟 + 模块级缓存",
+      "LIST_HEARTBEAT_MS = 30_000" in _page40
+      and "ROUND_HEARTBEAT_MS = 600_000" in _page40
+      and "useHeartbeat(() => void loadList()" in _page40
+      and "useHeartbeat(() => void loadRound()" in _page40
+      and "let cachedAccounts: AccountRow[] = [];" in _page40)
+check("骨架屏判据是「有没有数据」而不是「请求在不在飞」",
+      "listLoading && accounts.length === 0" in _page40
+      and "cachedAccounts.length === 0" in _page40)
+check("刷新按钮只在手动刷新时转圈（心跳/进入页面不转）",
+      "disabled={refreshing}" in _page40
+      and "refreshing ? 'size-4 animate-spin'" in _page40)
+check("进入页面自动刷新额度走服务端 TTL（60s）",
+      "CREDITS_TTL_SECONDS = 60" in _page40
+      and "api.accounts.credits(undefined, CREDITS_TTL_SECONDS)" in _page40)
+check("额度结果的来源标注（ok/cached/age）转成 uid -> meta",
+      "meta[x.uid] = {" in _page40 and "cached: !!x.cached" in _page40)
+
+_tbl40 = open(os.path.join(_ROOT, "web", "components", "common", "gateway",
+                           "AccountTable.tsx"), encoding="utf-8").read()
+check("账号列带头像 + 区域徽章并入账号列（workbuddy 版式）",
+      "grid size-7 shrink-0 place-items-center rounded-full" in _tbl40
+      and "(row.nickname || '?').charAt(0)" in _tbl40
+      and "row.realm === 'cn' ? '国内版' : '国际版'" in _tbl40
+      and "\n              区域\n" not in _tbl40)
+check("积分列标注来源：实时 / 缓存 N 秒 / 快照（快照不涂红）",
+      "function creditSourceBadge" in _tbl40
+      and "实时" in _tbl40 and "缓存 {meta.age}s" in _tbl40 and "快照" in _tbl40
+      and "const live = meta?.ok === true;" in _tbl40
+      and "!live && 'text-muted-foreground'" in _tbl40)
+check("行内动作原地刷新（onChanged 只重拉列表，不整页重载）",
+      "await onChanged();" in _tbl40)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
