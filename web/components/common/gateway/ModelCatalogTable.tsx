@@ -5,6 +5,13 @@ import {Boxes, ChevronDown, ChevronUp, Loader2, RefreshCw} from 'lucide-react';
 
 import {Badge} from '@/components/ui/badge';
 import {Button} from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {Skeleton} from '@/components/ui/skeleton';
 import {
   Table,
@@ -25,6 +32,9 @@ import {cn} from '@/lib/utils';
  * 数据来自 GET /v1/models?realm=，字段见 qoder2api/model_entry.py；
  * 展示口径对齐旧看板 dashboard.html 的「当前版本模型库与能力清单」：
  * 峰谷价、上下文窗口、思考档位、能力徽章、下架原因。
+ * 「上下文窗口 / 思考档位」可直接改该模型的默认值（存 GET /settings 的
+ * model_overrides，走 POST /settings/save）：客户端请求里带了值时仍以
+ * 客户端为准，这里只是「没带时的默认」；空值 = 恢复跟随官方默认。
  * 长列表默认只展示前 COLLAPSE_LIMIT 条，可展开全部。
  */
 
@@ -74,6 +84,40 @@ export interface ModelEntry {
   is_new?: boolean;
   realm?: string;
   realms?: string[];
+}
+
+/** 面板保存的「每模型默认值」：GET /settings 返回的 model_overrides。 */
+interface ModelOverride {
+  context_window?: number;
+  effort?: string;
+}
+type ModelOverrides = Record<string, ModelOverride>;
+type OverrideField = 'context_window' | 'effort';
+
+/** 「跟随官方默认」下拉哨兵值：Radix Select 不允许空字符串选项，保存时映射回空值。 */
+const FOLLOW_DEFAULT = '__follow_official_default__';
+
+/** 生成「写入 / 清除某项覆盖」后的新表（纯函数，供乐观更新与失败回滚使用）。 */
+function withOverride(
+  overrides: ModelOverrides,
+  ovKey: string,
+  field: OverrideField,
+  value: string,
+): ModelOverrides {
+  const next: ModelOverrides = {...overrides};
+  const item: ModelOverride = {...(next[ovKey] || {})};
+  if (field === 'context_window') {
+    const n = Number(value);
+    if (value && Number.isFinite(n) && n > 0) item.context_window = n;
+    else delete item.context_window;
+  } else if (value) {
+    item.effort = value;
+  } else {
+    delete item.effort;
+  }
+  if (item.context_window || item.effort) next[ovKey] = item;
+  else delete next[ovKey];
+  return next;
 }
 
 type Tone = 'ok' | 'warning' | 'muted' | 'violet' | 'sky';
@@ -213,18 +257,62 @@ function renderCaps(m: ModelEntry): React.ReactNode {
   );
 }
 
-function renderContext(m: ModelEntry): React.ReactNode {
+/**
+ * 上下文窗口：有官方多窗口时是「默认值下拉」（空 = 跟随官方默认），
+ * 没有多窗口但有 context_length 时保持静态展示。
+ */
+function renderContext(
+  m: ModelEntry,
+  override: ModelOverride | undefined,
+  saving: boolean,
+  onSave: (value: string) => void,
+): React.ReactNode {
   const windows = m.context_windows || [];
   if (windows.length) {
+    // 官方标签与窗口一一对应才采用，否则统一 K/M 换算。
     const labels =
       m.context_window_labels && m.context_window_labels.length === windows.length
         ? m.context_window_labels
-        : windows.map((w) => fmtK(w));
+        : null;
+    const labelAt = (i: number, w: number) => (labels && labels[i]) || fmtK(w);
+    const allLabels = windows.map((w, i) => labelAt(i, w));
+    const options = windows.map((w, i) => ({value: String(w), label: labelAt(i, w)}));
+    const curWin = override?.context_window != null ? String(override.context_window) : '';
+    if (curWin && !options.some((o) => o.value === curWin)) {
+      // 当前覆盖值不在官方列表里（如官方窗口表更新过）：插到最前，保留可回显。
+      options.unshift({value: curWin, label: fmtK(Number(curWin))});
+    }
+    const defLabel = m.context_window_default || allLabels[0] || '-';
     return (
-      <div className="space-y-0.5">
-        <div className="text-xs tabular-nums">{labels.join(' / ')}</div>
-        <div className="text-[10px] text-muted-foreground">
-          {m.context_window_default ? `默认 ${m.context_window_default}` : '可选多窗口'}
+      <div className="space-y-1">
+        <Select
+          value={curWin || FOLLOW_DEFAULT}
+          onValueChange={(v) => onSave(v === FOLLOW_DEFAULT ? '' : v)}
+          disabled={saving}
+        >
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-full max-w-[9rem] rounded-lg text-xs"
+            aria-label="默认上下文窗口"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={FOLLOW_DEFAULT}>跟随官方默认</SelectItem>
+            {options.map((o) => (
+              <SelectItem key={o.value} value={o.value}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div
+          className={cn(
+            'text-[10px]',
+            curWin ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+          )}
+        >
+          {curWin ? `已自定义（官方默认 ${defLabel}）` : `可选 ${allLabels.join(' / ')}`}
         </div>
       </div>
     );
@@ -240,7 +328,16 @@ function renderContext(m: ModelEntry): React.ReactNode {
   return <span className="text-xs text-muted-foreground">—</span>;
 }
 
-function renderEffort(m: ModelEntry): React.ReactNode {
+/**
+ * 思考档位：固定档位只显示徽章；官方给了档位表（或可关闭）时是下拉，
+ * 空 = 跟随官方默认；否则官方原生推理只显示「原生」徽章。
+ */
+function renderEffort(
+  m: ModelEntry,
+  override: ModelOverride | undefined,
+  saving: boolean,
+  onSave: (value: string) => void,
+): React.ReactNode {
   if (m.reasoning_fixed_effort) {
     return (
       <Badge variant="outline" className={cn('rounded-full text-[10px]', TONE_BADGE.violet)}>
@@ -248,26 +345,43 @@ function renderEffort(m: ModelEntry): React.ReactNode {
       </Badge>
     );
   }
-  const efforts = (m.reasoning_efforts || []).slice();
-  if (m.reasoning_can_disable && !efforts.includes('none')) efforts.push('none');
+  const efforts = (m.reasoning_efforts || []).map((e) => String(e));
+  if (m.reasoning_can_disable && !efforts.some((e) => e.toLowerCase() === 'none')) {
+    efforts.push('none');
+  }
   if (efforts.length) {
-    const def = String(m.reasoning_default_effort || '').toLowerCase();
+    const curEff = String(override?.effort || '').trim();
     return (
-      <div className="flex flex-wrap items-center gap-1">
-        {efforts.map((e) => (
-          <Badge
-            key={e}
-            variant="outline"
-            className={cn(
-              'rounded-full text-[10px]',
-              String(e).toLowerCase() === def && def ? TONE_BADGE.violet : TONE_BADGE.muted,
-            )}
-            title={String(e).toLowerCase() === def && def ? '官方默认档位' : undefined}
+      <div className="space-y-1">
+        <Select
+          value={curEff.toLowerCase() || FOLLOW_DEFAULT}
+          onValueChange={(v) => onSave(v === FOLLOW_DEFAULT ? '' : v)}
+          disabled={saving}
+        >
+          <SelectTrigger
+            size="sm"
+            className="h-7 w-full max-w-[9rem] rounded-lg text-xs"
+            aria-label="默认思考档位"
           >
-            {e}
-            {String(e).toLowerCase() === def && def ? ' ·默认' : ''}
-          </Badge>
-        ))}
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={FOLLOW_DEFAULT}>跟随官方默认</SelectItem>
+            {efforts.map((e) => (
+              <SelectItem key={e} value={e.toLowerCase()}>
+                {e}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div
+          className={cn(
+            'text-[10px]',
+            curEff ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+          )}
+        >
+          {curEff ? '已自定义' : `可选 ${efforts.join(' / ')}`}
+        </div>
       </div>
     );
   }
@@ -285,6 +399,17 @@ export function ModelCatalogTable({realm}: {realm: 'intl' | 'cn'}) {
   const [models, setModels] = React.useState<ModelEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [expanded, setExpanded] = React.useState(false);
+  /** GET /settings 的 model_overrides：{<realm>:<key>: {context_window, effort}}。 */
+  const [overrides, setOverrides] = React.useState<ModelOverrides>({});
+  /** 保存中的下拉：key 为 `<ovKey>|<field>`，期间禁用该下拉。 */
+  const [saving, setSaving] = React.useState<Record<string, boolean>>({});
+  /** 与 state 同步的镜像：保存失败回滚时要用「保存前」快照。 */
+  const overridesRef = React.useRef<ModelOverrides>({});
+
+  const applyOverrides = React.useCallback((next: ModelOverrides) => {
+    overridesRef.current = next;
+    setOverrides(next);
+  }, []);
 
   const load = React.useCallback(async () => {
     setLoading(true);
@@ -299,10 +424,62 @@ export function ModelCatalogTable({realm}: {realm: 'intl' | 'cn'}) {
     }
   }, [realm]);
 
+  /**
+   * 面板保存的每模型默认值（/settings 是面板接口，必须等鉴权就绪）。
+   * 拉取失败不打断模型表：下拉按「无覆盖」显示，不整体报错。
+   */
+  const loadOverrides = React.useCallback(async () => {
+    try {
+      const r = (await api.settings.get()) as {model_overrides?: ModelOverrides};
+      applyOverrides(r?.model_overrides || {});
+    } catch {
+      applyOverrides({});
+    }
+  }, [applyOverrides]);
+
   useAuthedLoad(() => {
     setExpanded(false); // 切换区域后回到收起态，避免长列表直接铺满
     void load();
-  }, [load]);
+    void loadOverrides();
+  }, [load, loadOverrides]);
+
+  /**
+   * change 即保存（无需确认）：空值 = 恢复跟随官方默认。
+   * 成功后用响应里的完整 model_overrides 就地更新，不重拉模型/设置；
+   * 失败提示并回滚到保存前的服务端状态。
+   */
+  const saveOverride = React.useCallback(
+    async (ovKey: string, field: OverrideField, value: string) => {
+      const saveKey = `${ovKey}|${field}`;
+      const prev = overridesRef.current;
+      applyOverrides(withOverride(prev, ovKey, field, value)); // 乐观显示
+      setSaving((s) => ({...s, [saveKey]: true}));
+      try {
+        const r = (await api.settings.save({
+          model_overrides: {[ovKey]: {[field]: value}},
+        })) as {model_overrides?: ModelOverrides};
+        if (r?.model_overrides && typeof r.model_overrides === 'object') {
+          applyOverrides(r.model_overrides);
+        }
+        notify.ok(
+          value
+            ? `已保存默认（${field === 'context_window' ? '窗口' : '档位'} ${value}），客户端未指定时生效`
+            : '已恢复跟随官方默认',
+        );
+      } catch (e) {
+        notify.err('保存失败', errText(e));
+        applyOverrides(prev);
+      } finally {
+        setSaving((s) => {
+          if (!s[saveKey]) return s;
+          const next = {...s};
+          delete next[saveKey];
+          return next;
+        });
+      }
+    },
+    [applyOverrides],
+  );
 
   const openCount = models.filter((m) => m.enabled !== false).length;
   const disabledCount = models.length - openCount;
@@ -324,7 +501,10 @@ export function ModelCatalogTable({realm}: {realm: 'intl' | 'cn'}) {
           size="sm"
           className="h-7 rounded-full text-xs"
           disabled={loading}
-          onClick={() => void load()}
+          onClick={() => {
+            void load();
+            void loadOverrides();
+          }}
         >
           {loading ? (
             <Loader2 className="size-3.5 animate-spin" />
@@ -373,6 +553,8 @@ export function ModelCatalogTable({realm}: {realm: 'intl' | 'cn'}) {
           ) : (
             visible.map((m) => {
               const disabled = m.enabled === false;
+              const ovKey = `${realm}:${m.upstream_key || m.id}`;
+              const ov = overrides[ovKey];
               return (
                 <TableRow
                   key={m.upstream_key || m.id}
@@ -419,8 +601,16 @@ export function ModelCatalogTable({realm}: {realm: 'intl' | 'cn'}) {
                   </TableCell>
                   <TableCell className="align-top">{renderPrice(m)}</TableCell>
                   <TableCell className="align-top">{renderCaps(m)}</TableCell>
-                  <TableCell className="align-top">{renderContext(m)}</TableCell>
-                  <TableCell className="pr-4 align-top">{renderEffort(m)}</TableCell>
+                  <TableCell className="align-top">
+                    {renderContext(m, ov, !!saving[`${ovKey}|context_window`], (value) =>
+                      void saveOverride(ovKey, 'context_window', value),
+                    )}
+                  </TableCell>
+                  <TableCell className="pr-4 align-top">
+                    {renderEffort(m, ov, !!saving[`${ovKey}|effort`], (value) =>
+                      void saveOverride(ovKey, 'effort', value),
+                    )}
+                  </TableCell>
                 </TableRow>
               );
             })

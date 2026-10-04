@@ -137,8 +137,40 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
   return parsed as T;
 }
 
+/**
+ * GET 原始文本（不解析 JSON）。
+ *
+ * 账号导出等下载场景必须把服务端返回的字节原样落盘；鉴权头与 401/403 →
+ * onUnauthorized 的语义和 request 完全一致，非 2xx 仍抛 ApiError（404 的
+ * error.message 原样保留，交给调用方展示）。
+ */
+async function getText(path: string): Promise<string> {
+  const r = await fetch(path, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: authHeaders(),
+  });
+  if (r.status === 401 || r.status === 403) {
+    fireUnauthorized();
+    throw new ApiError(r.status, '需要面板登录');
+  }
+  const text = await r.text();
+  if (!r.ok) {
+    let parsed: any = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      parsed = {raw: text};
+    }
+    const msg = parsed?.error?.message || parsed?.message || `HTTP ${r.status}`;
+    throw new ApiError(r.status, msg, parsed?.error?.detail || parsed?.detail || '');
+  }
+  return text;
+}
+
 export const http = {
   get: <T = any>(path: string) => request<T>('GET', path),
+  getText: (path: string) => getText(path),
   post: <T = any>(path: string, body?: unknown) => request<T>('POST', path, body),
 };
 

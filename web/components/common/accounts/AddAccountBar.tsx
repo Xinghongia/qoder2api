@@ -6,6 +6,7 @@ import {FileJson, KeyRound, ScanLine, UserPlus} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 
 import {DesktopScanDialog} from './DesktopScanDialog';
+import {ExportAccountsButton} from './ExportAccountsButton';
 import {ImportAccountsDialog} from './ImportAccountsDialog';
 import {OAuthDeviceDialog} from './OAuthDeviceDialog';
 import {PatImportDialog} from './PatImportDialog';
@@ -82,6 +83,8 @@ export function AddAccountBar({
           <FileJson className="size-3.5" />
           导入 JSON
         </Button>
+
+        <ExportAccountsButton />
 
         <span className="ml-auto hidden text-[11px] text-muted-foreground sm:inline">
           导入后原地刷新当前列表，不会切换区域

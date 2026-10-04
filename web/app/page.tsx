@@ -23,6 +23,7 @@ import {notify} from '@/lib/toast';
 import {AccountTable, type AccountRow} from '@/components/common/gateway/AccountTable';
 import {AddAccountBar} from '@/components/common/accounts/AddAccountBar';
 import {ModelCatalogTable} from '@/components/common/gateway/ModelCatalogTable';
+import {RecentRequestsTable} from '@/components/common/gateway/RecentRequestsTable';
 import {SchedulerBar} from '@/components/common/gateway/SchedulerBar';
 import {GrowthTasksPanel} from '@/components/common/gateway/GrowthTasksPanel';
 import {VmStatusCard} from '@/components/common/gateway/VmStatusCard';
@@ -163,6 +164,8 @@ export default function GatewayPage() {
       ) : (
         <AccountTable rows={rows} busy={busy} onCheckin={onCheckin} onChanged={load} />
       )}
+
+      <RecentRequestsTable realm={view} />
 
       <ModelCatalogTable realm={view} />
 

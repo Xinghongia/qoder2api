@@ -105,6 +105,35 @@ def content_type(filename):
     return _MIME.get(ext, "application/octet-stream")
 
 
+def page_exists(path):
+    """该路径是否存在导出页面（`<path>/index.html`）。
+
+    用于「/logs 这类既像接口又像页面的路径」在**浏览器导航**时的判别：
+    有人手输 /logs（没带尾斜杠）时应重定向到页面，而不是回接口的 401 JSON。
+    """
+    if not path.startswith("/"):
+        path = "/" + path
+    clean = path.rstrip("/")
+    if not clean:
+        return False
+    file_path, _cache = resolve(clean + "/")
+    return file_path is not None
+
+
+def is_browser_navigation(headers):
+    """判断请求是否来自浏览器导航（地址栏/点击链接/刷新），而非 fetch/XHR/脚本。
+
+    `Sec-Fetch-Mode: navigate` 只在真实导航时发送（fetch 是 cors，
+    普通脚本请求不带这个头）。没有该头的旧客户端回退看 Accept：
+    浏览器导航带 text/html；curl 默认 `*/*` 不是；fetch 默认也不带 text/html。
+    """
+    mode = (headers.get("Sec-Fetch-Mode") or "").strip().lower()
+    if mode:
+        return mode == "navigate"
+    accept = (headers.get("Accept") or "").lower()
+    return "text/html" in accept and "application/json" not in accept
+
+
 def index_html_path():
     """新前端首页（web/out/index.html）；不可用时返回 None。"""
     root = str(paths.static_dir())

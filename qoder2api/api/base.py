@@ -124,6 +124,14 @@ class HandlerBase(BaseHTTPRequestHandler):
         self._json(code, {"error": {"message": message, "type": err_type,
                                     "code": code}})
 
+    def _redirect(self, location, code=302):
+        """302 重定向（带 query 原样转发，`?key=` 引导链接不丢）。"""
+        self.send_response(code)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
     def _rate_limited(self, exc):
         """429 with Retry-After, so clients back off instead of hammering."""
         wait = max(1, int(getattr(exc, "wait", 60) or 60))

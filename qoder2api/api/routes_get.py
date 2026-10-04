@@ -37,6 +37,13 @@ class GetRoutesMixin(object):
         from . import static as static_mod
         if path in ("/", "/dashboard", "/ui", "/legacy"):
             return self._dashboard(path)
+        # 「/logs」「/settings」既是接口也是页面：无尾斜杠 + 浏览器导航（地址栏
+        # 手输、书签、旧链接）时重定向到带斜杠的页面；接口调用（fetch）不带
+        # Sec-Fetch-Mode: navigate，照常走下面。query 原样保留（?key= 引导）。
+        if (not path.endswith("/") and static_mod.is_browser_navigation(self.headers)
+                and static_mod.page_exists(path)):
+            location = path + "/" + (("?" + parsed.query) if parsed.query else "")
+            return self._redirect(location)
         # 前端静态页面（/stats/、/logs/、/settings/ 等导出路由）优先直出，
         # 不参与面板鉴权；接口路径（/logs、/settings/... 无尾斜杠）继续走下面。
         if not static_mod.api_takes_path(path):

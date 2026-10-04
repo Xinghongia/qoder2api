@@ -70,7 +70,25 @@ check("未知扩展回退二进制流",
       S.content_type("x.bin") == "application/octet-stream")
 
 print()
-print("[5] 旧看板入口（迁移期 /legacy）")
+print("[5] 浏览器导航 vs 接口调用（决定 /logs 是否重定向到 /logs/）")
+nav = {"Sec-Fetch-Mode": "navigate", "Accept": "text/html"}
+fetch = {"Sec-Fetch-Mode": "cors", "Accept": "*/*"}
+plain = {"Accept": "*/*"}
+old_browser = {"Accept": "text/html,application/xhtml+xml"}
+check("导航（navigate）判定为真", S.is_browser_navigation(nav))
+check("fetch（cors）判定为假", not S.is_browser_navigation(fetch))
+check("curl 默认头判定为假", not S.is_browser_navigation(plain))
+check("旧浏览器（只有 text/html Accept）判定为真",
+      S.is_browser_navigation(old_browser))
+check("接口请求带 application/json 时不误判",
+      not S.is_browser_navigation({"Accept": "text/html, application/json"}))
+check("/logs 存在导出页面（导航时该重定向）", S.page_exists("/logs"))
+check("/stats 存在导出页面", S.page_exists("/stats"))
+check("/accounts 没有页面（仍归接口）", not S.page_exists("/accounts"))
+check("/v1/models 没有页面（仍归接口）", not S.page_exists("/v1/models"))
+
+print()
+print("[6] 旧看板入口（迁移期 /legacy）")
 legacy = S.legacy_dashboard_path()
 check("legacy/dashboard.html 存在时能定位",
       legacy is None or os.path.isfile(legacy), legacy)

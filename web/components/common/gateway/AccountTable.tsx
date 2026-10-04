@@ -3,6 +3,7 @@
 import * as React from 'react';
 import {
   Activity,
+  Download,
   Loader2,
   Power,
   RefreshCw,
@@ -11,6 +12,7 @@ import {
   Zap,
 } from 'lucide-react';
 
+import {exportAccountsFile} from '@/components/common/accounts/ExportAccountsButton';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -164,14 +166,14 @@ export function AccountTable({
 
   const isPending = (uid: string, action: string) => !!pending[`${action}:${uid}`];
 
-  const runRow = (key: string, fn: () => Promise<void>) => {
+  const runRow = (key: string, fn: () => Promise<void>, errTitle = '操作失败') => {
     if (pending[key]) return;
     setPending((p) => ({...p, [key]: true}));
     void (async () => {
       try {
         await fn();
       } catch (e) {
-        notify.err('操作失败', errText(e));
+        notify.err(errTitle, errText(e));
       } finally {
         setPending((p) => {
           const next = {...p};
@@ -244,6 +246,17 @@ export function AccountTable({
       notify.ok(next ? '账号已启用' : '账号已停用', row.nickname || uid8(row.uid));
       await onChanged();
     });
+
+  /** 单账号导出：与批量同一文档格式，文件名带 uid 前 8 位（旧看板 exportOne 同款）。 */
+  const exportOne = (row: AccountRow) =>
+    runRow(
+      `export:${row.uid}`,
+      async () => {
+        const r = await exportAccountsFile(row.uid);
+        notify.ok(`已导出 1 个账号 → ${r.name}`);
+      },
+      '导出失败',
+    );
 
   const confirmDelete = async () => {
     const row = deleteTarget;
@@ -611,6 +624,21 @@ export function AccountTable({
                           <Power className="size-3.5" />
                         )}
                         {row.enabled ? '停用' : '启用'}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 rounded-full px-2 text-xs"
+                        disabled={isPending(row.uid, 'export')}
+                        title="导出该账号为 JSON 文件（含凭证，可重新导入）"
+                        onClick={() => exportOne(row)}
+                      >
+                        {isPending(row.uid, 'export') ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <Download className="size-3.5" />
+                        )}
+                        导出
                       </Button>
                       <Button
                         variant="ghost"
