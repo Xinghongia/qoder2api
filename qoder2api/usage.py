@@ -92,13 +92,17 @@ def row_matches_realm(row, realm):
 
 
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
-                 gen_ms=None, fp=None, account=None, key=None):
+                 gen_ms=None, fp=None, account=None, key=None, fallback=None):
     """Accumulate stats, append a JSONL row, and persist the summary.
 
     key：本次请求所用的 API Key 条目（api/base.py 的 key_entry）。有值时把
     key_id/key_name 写进行内——用量统计的「按密钥维度」全靠它；面板会话或
     未开启鉴权时写空值（统计里显示为「未使用密钥」；**没有这个字段的历史行**
     则显示为「旧版数据（升级前）」，见 usagedb 的 LEGACY_KEY_ID）。
+
+    fallback：本次请求发生出口回退时为 {"from","to","reason"}（见
+    open_upstream）——写进行内，面板在模型旁标注「回退」，让"设了优先出口
+    却跑在另一区"一眼可见（此前只能靠账号昵称猜）。
     """
     fields = _extract_usage(usage)
     if not fields:
@@ -122,6 +126,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
         row["key_name"] = str(key.get("name") or "")
     acc = runtime.POOL.get(account) if (account and runtime.POOL) else None
     row["realm"] = acc.realm if acc else runtime.CURRENT_REALM
+    if fallback:
+        row["fallback"] = fallback
     if gen_ms and gen_ms > 0:
         row["tokens_per_sec"] = round(
             fields["completion_tokens"] / (gen_ms / 1000.0), 2)

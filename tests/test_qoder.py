@@ -583,7 +583,7 @@ class _A(object):
 try:
     time.sleep = lambda s: _sleeps.append(s)
     upstream.open_upstream = _fake_open
-    obj, acc = upstream.aggregate_with_envelope_retry(
+    obj, acc, _fb = upstream.aggregate_with_envelope_retry(
         _ErrResp(), {"model": "qfmodel"}, None, "cn", "qfmodel",
         {"usage": None}, _A())
     check("envelope 418 -> reopened upstream and recovered",
@@ -3911,7 +3911,7 @@ check("record_usage carries the API key id/name into the JSONL row",
       "key_id" in _src35 and "key_name" in _src35
       and "def record_usage(model, usage, stream=None, elapsed_ms=None, "
           "ttft_ms=None,\n                 gen_ms=None, fp=None, account=None, "
-          "key=None)" in _src35)
+          "key=None, fallback=None)" in _src35)
 check("record_error also records key + realm (failures stay attributable)",
       "def record_error(model, status, message, elapsed_ms=None, key=None, "
       "realm=None)" in _src35)
@@ -4320,6 +4320,151 @@ check("测试按钮固定测 Qwen3.8-Flash（双区都有、官方免费模型�
       "const TEST_MODEL = 'Qwen3.8-Flash';" in _tbl40
       and "api.accounts.test(row.uid, TEST_MODEL)" in _tbl40
       and "0 积分（免费）" in _tbl40)
+
+print()
+print("[42] 出口回退：首选区账号本轮全被拒不空等，回退另一区并把回退写进记录")
+
+
+class _FallbackAcc42(object):
+    """最小账号桩：只用得到 ready()/note_error 等调度字段。"""
+
+    def __init__(self, uid, realm):
+        self.uid = uid
+        self.realm = realm
+        self.enabled = True
+        self.access_token = "dt-test"
+        self.refresh_token = ""
+        self.personal_token = ""
+        self.expires_at = None
+        self.cooldown_until = 0.0
+        self.model_cooldowns = {}
+        self.user_type = "personal_professional"
+        self.nickname = uid
+        self.last_error = ""
+        self.credits = None
+        self.path = None
+        self.in_flight = 0
+        self.consecutive_failures = 0
+
+    def ready(self, model=None):
+        return self.enabled and not (self.cooldown_until > time.time()) \
+            and not (model and self.model_cooldowns.get(model, 0) > time.time())
+
+    def quota_depleted(self):
+        return False
+
+    def clear_error(self, model=None):
+        self.last_error = ""
+
+    def note_error(self, message, cooldown=60, single_account=False, model=None,
+                   until=None, escalate=False):
+        self.last_error = str(message)[:200]
+        if model:
+            self.model_cooldowns[model] = time.time() + float(cooldown)
+            return
+        self.cooldown_until = time.time() + (3 if single_account else float(cooldown))
+
+    def headers(self, purpose="openapi"):
+        return {}
+
+
+_orig_pool42 = runtime.POOL
+_orig_mode42 = (runtime.REALM_MODE, runtime.REALM_PREFERRED, runtime.CURRENT_REALM)
+_orig_urlopen42 = qoder_net.urlopen
+try:
+    _pool42 = __import__("qoder2api.accounts", fromlist=["x"]).AccountPool(
+        runtime.ACCOUNTS_DIR)
+    _intl42 = _FallbackAcc42("intl-1", "intl")
+    _cn42 = _FallbackAcc42("cn-1", "cn")
+    _pool42.accounts = [_intl42, _cn42]
+    runtime.POOL = _pool42
+    runtime.REALM_MODE, runtime.REALM_PREFERRED, runtime.CURRENT_REALM = \
+        "both", "intl", "intl"
+
+    class _GoodStream42(object):
+        def __iter__(self):
+            inner = json.dumps({"choices": [{"delta": {"content": "ok"}}]})
+            yield ("data: " + json.dumps({"statusCodeValue": 200, "body": inner})
+                   + "\n\n").encode()
+            yield b'data: {"statusCodeValue":200,"body":"[DONE]"}\n\n'
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    _seen_hosts42 = []
+
+    def _urlopen42(req, timeout=None):
+        url = getattr(req, "full_url", "") or ""
+        _seen_hosts42.append(url)
+        if "api1.qoder.sh" in url:
+            import io as _io42
+            import urllib.error as _ue42
+            raise _ue42.HTTPError(
+                url, 403, "Forbidden", None,
+                _io42.BytesIO(b'{"code":"10605","message":"isQueued retryAfterSeconds 30"}'))
+        return _GoodStream42()
+
+    qoder_net.urlopen = _urlopen42
+    _resp42, _acc42, _ = upstream.open_upstream(
+        {"model": "qfmodel", "messages": [{"role": "user", "content": "hi"}],
+         "stream": False}, target_realm=None)
+    check("首选区（国际）账号被拒后回退国内完成请求",
+          _acc42 is _cn42 and _resp42.fallback
+          and _resp42.fallback.get("from") == "intl"
+          and _resp42.fallback.get("to") == "cn"
+          and _resp42.fallback.get("reason") == "rejected", _resp42.fallback)
+    check("回退前确实先试过首选区（没有跳过国际版直接国内）",
+          any("api1.qoder.sh" in u for u in _seen_hosts42)
+          and any("gateway.qoder.com.cn" in u for u in _seen_hosts42),
+          [u.split("/")[2] for u in _seen_hosts42])
+    try:
+        _resp42.close()
+    except Exception:
+        pass
+
+    # 回退信息进用量行：面板的「回退」徽标全靠它
+    _orig_usage42 = json.loads(json.dumps(usage_mod._usage))
+    try:
+        usage_mod.record_usage("qfmodel", {"total_tokens": 10, "credits": 0},
+                               account=_cn42.uid, key=None,
+                               fallback={"from": "intl", "to": "cn",
+                                         "reason": "rejected"})
+        _last42 = None
+        with open(runtime.USAGE_LOG, encoding="utf-8") as _fh42:
+            for _line42 in _fh42:
+                if _line42.strip():
+                    _last42 = json.loads(_line42)
+        check("record_usage 把 fallback 写进行内（用量行自带回退标记）",
+              (_last42 or {}).get("fallback") == {"from": "intl", "to": "cn",
+                                                  "reason": "rejected"},
+              (_last42 or {}).get("fallback"))
+    finally:
+        usage_mod._usage = _orig_usage42
+
+    # 静态护栏：流首注释帧 / 三返回值 / 槽位
+    check("SSE 流首带 : qoder-fallback 注释帧（curl 也能看到回退）",
+          "qoder-fallback" in _src35
+          and "def _sse_begin(self, fallback=None)" in _src35)
+    check("aggregate_with_envelope_retry 返回 (obj, account, fallback)",
+          'return obj, account, getattr(cur, "fallback", None)' in _src35)
+    check("_LeasedResp 带 fallback 槽位",
+          '"fallback")' in _src35 and "lease.fallback = fallback" in _src35)
+
+    _table42 = open(os.path.join(_ROOT, "web", "components", "common", "gateway",
+                                 "RecentRequestsTable.tsx"), encoding="utf-8").read()
+    check("请求表显示「回退 国内/国际」徽标",
+          "回退 {realmCn(r.fallback.to)}" in _table42
+          and "fallback?: {from?: string; to?: string; reason?: string}" in _table42)
+finally:
+    qoder_net.urlopen = _orig_urlopen42
+    runtime.POOL = _orig_pool42
+    runtime.REALM_MODE, runtime.REALM_PREFERRED, runtime.CURRENT_REALM = _orig_mode42
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

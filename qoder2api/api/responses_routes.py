@@ -82,7 +82,7 @@ class ResponsesRoutesMixin(object):
             return self._error(502, "upstream unreachable: %s" % exc)
         with upstream:
             if want_stream:
-                self._sse_begin()
+                self._sse_begin(fallback=getattr(upstream, "fallback", None))
                 first_ms = None
                 # 流内信封重试：上游可能 HTTP200 建流后在信封里投 418
                 # （access log 记 200 + 业务错 418 即此形态）。只要还没向
@@ -153,6 +153,15 @@ class ResponsesRoutesMixin(object):
                                     except Exception:
                                         pass
                                 cur = cur2
+                                fb2 = getattr(cur2, "fallback", None)
+                                if fb2 and fb2 != getattr(upstream, "fallback", None):
+                                    try:
+                                        self._sse_write(
+                                            (": qoder-fallback: %s\n\n"
+                                             % json.dumps(fb2, ensure_ascii=False)
+                                             ).encode("utf-8"))
+                                    except Exception:
+                                        pass
                                 continue
                             pump_exc = exc
                             break
@@ -184,10 +193,11 @@ class ResponsesRoutesMixin(object):
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms)
                              if first_ms is not None else None,
-                             fp=fp, account=account.uid, key=key)
+                             fp=fp, account=account.uid, key=key,
+                             fallback=getattr(cur, "fallback", None))
                 return
             try:
-                chat_obj, account = aggregate_with_envelope_retry(
+                chat_obj, account, fb = aggregate_with_envelope_retry(
                     upstream, chat_req, session_key, req_realm, model,
                     holder, account)
             except UpstreamStatus as exc:
@@ -204,5 +214,5 @@ class ResponsesRoutesMixin(object):
             wall = int((time.time() - t_start) * 1000)
             result = chat_to_response(chat_obj, model, custom_names)
             record_usage(model, chat_obj.get("usage"), stream=False, key=key,
-                         elapsed_ms=wall, fp=fp, account=account.uid)
+                         elapsed_ms=wall, fp=fp, account=account.uid, fallback=fb)
             return self._json(200, result)

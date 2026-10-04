@@ -310,7 +310,8 @@ def aggregate_with_envelope_retry(resp, payload, session_key, realm, model,
                                   holder, account):
     """非流式：流内瞬时错误信封 / 传输抖动 -> 重开上游重新聚合。
 
-    仅用于客户端尚未收到任何字节的非流式路径。返回 (chat_obj, account)：
+    仅用于客户端尚未收到任何字节的非流式路径。返回 (chat_obj, account,
+    fallback)：fallback 为本次实际所用连接上的出口回退信息（无则 None）。
       - 最终信封错误以 UpstreamStatus 抛出（调用方既有分支处理：记账+友好提示）
       - 重开时 open_upstream 的 RateLimited/HTTPError 记日志后仍以**原信封**
         错误上抛（原错误才是本次请求的真实结果，且其分支已具备友好映射）
@@ -323,7 +324,7 @@ def aggregate_with_envelope_retry(resp, payload, session_key, realm, model,
             try:
                 obj = aggregate_stream(cur, model, None, holder=holder,
                                        allowed_names=tool_names_from_payload(payload))
-                return obj, account
+                return obj, account, getattr(cur, "fallback", None)
             except UpstreamStatus as exc:
                 # 信封层 403/10605、429、死会话：冷却该账号 + 解绑会话亲和
                 # （换号语义由 should_retry_envelope 放行 401/403/429 完成）
@@ -384,14 +385,19 @@ class _LeasedResp(object):
 
     流式响应从 open 到 close / with 退出期间在途数 +1；close 或退出时
     恰好释放一次（重复 close 安全）。其余属性/方法原样转发给底层响应。
+
+    fallback：open_upstream 的回退信息（{"from","to","reason"} 或 None），
+    由 open_upstream 在返回前挂上；调用方据此把「本次实际跑在另一区」
+    写进用量行与流首注释帧。
     """
 
-    __slots__ = ("_resp", "_account", "_released")
+    __slots__ = ("_resp", "_account", "_released", "fallback")
 
     def __init__(self, resp, account):
         self._resp = resp
         self._account = account
         self._released = False
+        self.fallback = None
 
     def _release(self):
         if not self._released:
@@ -444,6 +450,11 @@ def open_upstream(payload, session_key=None, target_realm=None):
                 （1s/2s 退避），仍失败短冷却(15s/单账号3s)换号
       - 其他 4xx（含客户端参数错）-> 快速失败，冷却换号，不重试
     全部账号失败后抛 RateLimited 或最后一个错误。
+
+    `fallback` 挂在返回的 resp 上（`_LeasedResp.fallback`，形如
+    {"from": "intl", "to": "cn", "reason": "no_ready_account"|"rejected"}）：
+    请求记录把它写进用量行（fallback=...），面板据此标注「回退」——用户
+    设了优先出口却在别区完成请求时，必须一眼可见，而不是靠猜账号。
     """
     model = str(payload.get("model") or "")
     candidates = realm_candidates(model=model, explicit=target_realm)
@@ -469,13 +480,47 @@ def open_upstream(payload, session_key=None, target_realm=None):
     last_429 = None
     last_429_detail = ""
     waited_cool = False
+    fallback = {"from": candidates[0], "to": realm, "reason": "no_ready_account"} \
+        if realm != candidates[0] else None
+    tried_fallback = False
+
+    def tried_accounts():
+        """本轮已试过的账号对象（回退判定要看首选区是否真的试过）。"""
+        return [a for a in (runtime.POOL.accounts if runtime.POOL else [])
+                if a.uid in tried]
 
     # 额外 +2 次迭代预算：只供“短错误冷却等待续上”使用（正常轮换仍由
-    # tried 集合自然终止）。
-    for _ in range(total + 2):
+    # tried 集合自然终止）；另有 1 次预算给“首选区全灭后回退另一区”。
+    for _ in range(total + 3):
         account = runtime.POOL.pick_for_session(realm=realm, session_key=session_key,
                                         exclude=tried, model=model) if runtime.POOL else None
         if account is None:
+            # 首选区账号本轮全部被拒（凭证/排队等）→ 立刻回退另一区，
+            # **不走“等待续上”**：等待要先把首选区冷却等完（每条请求白等
+            # 30 秒），回退区明明有可用账号。与 realm_model_throttled 的
+            # 语义一致：整区不可用时不为它干等（429 频控不走这里）。
+            if not tried_fallback and fallback is None \
+                    and len(candidates) > 1 and tried \
+                    and all(a.realm == candidates[0] for a in tried_accounts()):
+                fallback = {"from": candidates[0], "to": candidates[1],
+                            "reason": "rejected"}
+                realm = candidates[1]
+                model_key = qoder_catalog.resolve_upstream_key(model, realm=realm)
+                representative = runtime.POOL.pick(realm=realm) \
+                    if runtime.POOL else None
+                body_obj = build_qoder_body(payload, representative, model_key,
+                                            realm=realm)
+                encoded = qoder_encode(
+                    json.dumps(body_obj, ensure_ascii=False).encode("utf-8"))
+                total = max(1, runtime.POOL.count_ready(realm, model=model)) \
+                    if runtime.POOL else 1
+                tried_fallback = True
+                waited_cool = False
+                log("realm fallback: %s -> %s (首选出口账号本轮全部被拒：%s)"
+                    % (candidates[0], realm,
+                       str(getattr(last_error, "detail", "") or last_error)[:120]),
+                    level="WARN", tag="chat")
+                continue
             if not waited_cool:
                 wait = _short_error_cooldown_wait(realm, model,
                                                   exclude=tried)
@@ -576,7 +621,9 @@ def open_upstream(payload, session_key=None, target_realm=None):
             account.clear_error(model=model)
             # 在途计数 +1：响应关闭（close / with 退出）时释放，供 least-busy 调度
             account.in_flight = getattr(account, "in_flight", 0) + 1
-            return _LeasedResp(resp, account), account, encoded
+            lease = _LeasedResp(resp, account)
+            lease.fallback = fallback
+            return lease, account, encoded
 
         exc = last_exc
         # ---- 错误分类（与原有轮换语义一致） ----

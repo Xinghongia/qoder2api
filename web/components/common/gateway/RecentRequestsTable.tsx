@@ -61,6 +61,8 @@ interface RecentRow {
   total_tokens?: number;
   /** 本次请求实际消耗积分（上游 usage.credits；免费模型/失败行为 0/缺失）。 */
   credit?: number;
+  /** 出口回退（open_upstream）：设了优先出口却跑在另一区时由后端写入。 */
+  fallback?: {from?: string; to?: string; reason?: string};
   realm?: string;
 }
 
@@ -83,9 +85,13 @@ const fmtCredit = (n: number | null | undefined) => {
   return v.toFixed(4).replace(/\.?0+$/, '');
 };
 
+/** 区域中文简写（回退徽标用）：intl -> 国际，cn -> 国内。 */
+const realmCn = (r?: string) => (r === 'intl' ? '国际' : r === 'cn' ? '国内' : r || '?');
+
 const TONE = {
   danger: 'border-red-500/35 bg-red-500/10 text-red-700 dark:text-red-400',
   ok: 'border-emerald-600/30 bg-emerald-600/10 text-emerald-700 dark:text-emerald-400',
+  warning: 'border-amber-500/35 bg-amber-500/10 text-amber-700 dark:text-amber-400',
   muted: 'border-border/60 text-muted-foreground',
 };
 
@@ -298,7 +304,27 @@ export function RecentRequestsTable({
                   <TableCell className="pl-4 font-mono text-xs tabular-nums text-muted-foreground">
                     {(r.iso || '').replace('T', ' ').slice(5)}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{r.model || '—'}</TableCell>
+                  {/* 模型 + 出口回退徽标：设了优先出口却跑在另一区时一眼可见 */}
+                  <TableCell className="font-mono text-xs">
+                    <span className="inline-flex items-center gap-1.5">
+                      {r.model || '—'}
+                      {r.fallback && (
+                        <Badge
+                          variant="outline"
+                          className={cn('shrink-0 rounded-full px-1.5 py-0 text-[10px]', TONE.warning)}
+                          title={`本次为出口回退：${realmCn(r.fallback.from)} → ${realmCn(
+                            r.fallback.to,
+                          )}（${
+                            r.fallback.reason === 'rejected'
+                              ? '首选出口账号被上游拒绝'
+                              : '首选出口当前没有可用账号'
+                          }）`}
+                        >
+                          回退 {realmCn(r.fallback.to)}
+                        </Badge>
+                      )}
+                    </span>
+                  </TableCell>
                   {/* 账号显示昵称（如 aliyun3780958258），比 uid 前缀好认；
                       账号已删时后端拿不到名字，回落 uid 前缀。 */}
                   <TableCell className="text-[11px] text-muted-foreground">

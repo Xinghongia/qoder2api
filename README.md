@@ -1,7 +1,7 @@
 # Qoder2API
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.11-2496ED?style=flat-square" alt="Version 1.2.11">
+  <img src="https://img.shields.io/badge/Release-v1.2.12-2496ED?style=flat-square" alt="Version 1.2.12">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -189,6 +189,14 @@ qoder2api/
 ## 📜 版本与更新日志
 
 早期版本（v1.1.x）的完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)；以下是本仓库的近期变更。
+
+### v1.2.12
+
+**出口回退不再静默 + 首选区排队时不再空撞（"设了优先国际版却跑在国内账号"的体验修复）**
+
+- **回退可见**：请求发生跨区回退（首选出口此刻没有可用账号，或账号被上游拒绝）时，后端把回退信息写进用量行（`fallback: {from, to, reason}`）并在流式响应的首个注释帧标注（`curl` 也能直接看到）；面板「最近请求 / 全部请求记录」在模型名旁显示琥珀色「回退 国内/国际」徽标，悬停给出原因——"设了优先出口却跑在另一区"从此一眼可见，不用再靠账号昵称猜。
+- **排队窗口短路**：上游对国际版免费模型返回 `10605 isQueued`（`serviceAvailable=false`，`retryAfterSeconds:30`）时，首选区账号全部被冷却——此时**立刻回退另一区**，不再走"等待续上"（那要把首选区的冷却等完，导致每条请求先白撞国际版 4~8 秒才落到国内）。429 真频控语义不变。
+- 测试：635 PASS / 0 FAIL（新增 [42] 组 7 条：回退判定与先试首选区、`fallback` 写入用量行、SSE 注释帧、三返回值契约、表格徽标）。
 
 ### v1.2.11
 

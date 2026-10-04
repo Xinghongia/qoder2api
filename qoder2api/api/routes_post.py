@@ -127,7 +127,7 @@ class PostRoutesMixin(object):
             holder = {"usage": None,
                       "allowed_names": tool_names_from_payload(payload)}
             if want_stream:
-                self._sse_begin()
+                self._sse_begin(fallback=getattr(upstream, "fallback", None))
                 emitted = False
                 first_ms = None
                 # 流内信封重试（同上：200 建流后信封投 418 的形态），仅在
@@ -185,6 +185,17 @@ class PostRoutesMixin(object):
                                     except Exception:
                                         pass
                                 cur = cur2
+                                # 重开后若发生了跨区回退，补一个流首注释帧
+                                # （流已开始，只能补发；客户端按规范忽略注释）
+                                fb2 = getattr(cur2, "fallback", None)
+                                if fb2 and fb2 != getattr(upstream, "fallback", None):
+                                    try:
+                                        self._sse_write(
+                                            (": qoder-fallback: %s\n\n"
+                                             % json.dumps(fb2, ensure_ascii=False)
+                                             ).encode("utf-8"))
+                                    except Exception:
+                                        pass
                                 continue
                             pump_exc = exc
                             break
@@ -223,10 +234,11 @@ class PostRoutesMixin(object):
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms)
                              if first_ms is not None else None,
-                             fp=fp, account=account.uid, key=key)
+                             fp=fp, account=account.uid, key=key,
+                             fallback=getattr(cur, "fallback", None))
                 return
             try:
-                result, account = aggregate_with_envelope_retry(
+                result, account, fb = aggregate_with_envelope_retry(
                     upstream, payload, session_key, req_realm, model,
                     holder, account)
             except UpstreamStatus as exc:
@@ -252,5 +264,5 @@ class PostRoutesMixin(object):
             record_usage(model, result.get("usage"), stream=False,
                          elapsed_ms=wall, ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, account=account.uid, key=key)
+                         fp=fp, account=account.uid, key=key, fallback=fb)
             return self._json(200, result)

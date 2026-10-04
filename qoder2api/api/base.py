@@ -68,13 +68,17 @@ class HandlerBase(BaseHTTPRequestHandler):
             pass
         log(fmt % args)
 
-    def _sse_begin(self):
+    def _sse_begin(self, fallback=None):
         """开始一个 HTTP/1.1 SSE 流：用 chunked 编码，保持连接可复用。
 
         之前用 `Connection: close` + 裸写字节：客户端（连接池型 harness）
         会把该连接视为可复用，下一次请求落在已半关闭的连接上，表现为
         “一直重连 / 连不上”。改为 chunked 后，流结束发 0 长度的终止块，
         连接保持 keep-alive，可安全复用。
+
+        fallback（open_upstream 的回退信息，形如 {"from","to","reason"}）：
+        有值时在流首带一个 SSE 注释帧（`: qoder-fallback: ...`，客户端按
+        规范忽略），让 curl / 抓包的人一眼看到"这条请求其实跑在了另一区"。
         """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -84,6 +88,12 @@ class HandlerBase(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self._chunked = True
+        if fallback:
+            try:
+                note = json.dumps(fallback, ensure_ascii=False)
+                self._sse_write((": qoder-fallback: %s\n\n" % note).encode("utf-8"))
+            except Exception:
+                pass
 
     def _sse_write(self, data):
         """按 chunked 编码写一段数据（data: bytes）。"""
