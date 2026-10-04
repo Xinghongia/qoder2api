@@ -305,14 +305,13 @@ export default function UsagePage() {
         />
       </div>
 
-      {/* 全量请求记录：跟随上方时间范围（服务端分页，可翻到底）。
-          showCredit = 末尾「积分」列，看每次请求实际烧了多少积分。 */}
+      {/* 全量请求记录：跟随上方时间范围（服务端分页，可翻到底）；
+          表格与仪表盘共用，含末尾「积分」列（每次请求实际消耗）。 */}
       <RecentRequestsTable
         realm={view}
         title="全部请求记录"
         from={logRange.from}
         to={logRange.to}
-        showCredit
       />
     </div>
   );

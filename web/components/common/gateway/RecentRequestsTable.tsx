@@ -27,17 +27,16 @@ import {cn} from '@/lib/utils';
  *     非法值回退 20，切换后回到第 1 页；
  *   · 页码列表算法、上一页 / 下一页禁用边界、`第 X / Y 页 · 共 N 条记录`
  *     与旧版一致（total ≤ 7 全列，其余带省略号）；
- *   · 表头 12 列：时间 / 模型 / 账号 / 模式 / 耗时 / 首字 / 速度 / 输入 /
- *     输出 / 思考 / 缓存 / 总 token；失败行在耗时列显示红色「失败」徽章；
- *     `showCredit` 时在末尾追加第 13 列「积分」（每次请求实际消耗，上游
- *     usage.credits）——用量页看全量账单，仪表盘预览保持 12 列；
+ *   · 表头 13 列：时间 / 模型 / 账号 / 模式 / 耗时 / 首字 / 速度 / 输入 /
+ *     输出 / 思考 / 缓存 / 总 token / 积分（每次请求实际消耗，上游
+ *     usage.credits；0 = 本次未计费）；失败行在耗时列显示红色「失败」徽章；
  *   · 切换区域回到第 1 页并重拉；加载失败只提示、不清空已展示的数据。
  */
 
 const LIMIT_OPTIONS = [10, 20, 50, 100] as const;
 const DEFAULT_LIMIT = 20;
 const LIMIT_STORE = 'WB_RECENT_LIMIT';
-const COLUMN_COUNT = 12;
+const COLUMN_COUNT = 13;
 
 /** 后端 recent_usage()（qoder2api/usage.py）返回的单行；失败行没有 stream / 用量字段。 */
 interface RecentRow {
@@ -119,7 +118,6 @@ export function RecentRequestsTable({
   hint,
   from,
   to,
-  showCredit = false,
 }: {
   realm: Realm;
   /** 卡片标题：仪表盘用默认「最近请求」；用量页用「全部请求记录」。 */
@@ -129,8 +127,6 @@ export function RecentRequestsTable({
   /** 本地日期范围（YYYY-MM-DD，含两端）；不传 = 不限时间。 */
   from?: string;
   to?: string;
-  /** 末尾追加「积分」列（用量页的全量账单视图用；仪表盘预览不显示）。 */
-  showCredit?: boolean;
 }) {
   // limit 为 null 表示「本地偏好还没读出来」：先不发请求，读出来后只发一次。
   const [limit, setLimit] = React.useState<number | null>(null);
@@ -203,7 +199,6 @@ export function RecentRequestsTable({
   };
 
   const showSkeleton = loading && rows.length === 0;
-  const columns = showCredit ? COLUMN_COUNT + 1 : COLUMN_COUNT;
 
   return (
     <section className="overflow-hidden rounded-[20px] bg-muted">
@@ -269,26 +264,19 @@ export function RecentRequestsTable({
             <TableHead className="text-[11px] font-normal text-muted-foreground">
               缓存
             </TableHead>
-            <TableHead
-              className={cn(
-                'text-[11px] font-normal text-muted-foreground',
-                !showCredit && 'pr-4',
-              )}
-            >
+            <TableHead className="text-[11px] font-normal text-muted-foreground">
               总 token
             </TableHead>
-            {showCredit && (
-              <TableHead className="pr-4 text-[11px] font-normal text-muted-foreground">
-                积分
-              </TableHead>
-            )}
+            <TableHead className="pr-4 text-[11px] font-normal text-muted-foreground">
+              积分
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {showSkeleton ? (
             Array.from({length: 5}).map((_, i) => (
               <TableRow key={i} className="border-b border-border/40 hover:bg-transparent">
-                <TableCell colSpan={columns} className="pl-4">
+                <TableCell colSpan={COLUMN_COUNT} className="pl-4">
                   <Skeleton className="h-5 w-full" />
                 </TableCell>
               </TableRow>
@@ -296,7 +284,7 @@ export function RecentRequestsTable({
           ) : rows.length === 0 ? (
             <TableRow className="border-0 hover:bg-transparent">
               <TableCell
-                colSpan={columns}
+                colSpan={COLUMN_COUNT}
                 className="py-10 text-center text-xs text-muted-foreground"
               >
                 还没有请求记录
@@ -354,26 +342,24 @@ export function RecentRequestsTable({
                   <TableCell className="tabular-nums">
                     {r.cache_hit_pct != null ? `${r.cache_hit_pct}%` : '—'}
                   </TableCell>
-                  <TableCell className={cn('tabular-nums', !showCredit && 'pr-4')}>
+                  <TableCell className="tabular-nums">
                     <b>{fmt(r.total_tokens)}</b>
                   </TableCell>
-                  {showCredit && (
-                    <TableCell className="pr-4 tabular-nums">
-                      {r.error ? (
-                        '—'
-                      ) : (
-                        <span
-                          className={cn(
-                            (r.credit ?? 0) > 0
-                              ? 'text-amber-600 dark:text-amber-400'
-                              : 'text-muted-foreground',
-                          )}
-                        >
-                          {fmtCredit(r.credit)}
-                        </span>
-                      )}
-                    </TableCell>
-                  )}
+                  <TableCell className="pr-4 tabular-nums">
+                    {r.error ? (
+                      '—'
+                    ) : (
+                      <span
+                        className={cn(
+                          (r.credit ?? 0) > 0
+                            ? 'text-amber-600 dark:text-amber-400'
+                            : 'text-muted-foreground',
+                        )}
+                      >
+                        {fmtCredit(r.credit)}
+                      </span>
+                    )}
+                  </TableCell>
                 </TableRow>
               );
             })

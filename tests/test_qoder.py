@@ -4000,15 +4000,13 @@ check("shared table defaults to the plain 最近请求 title",
       "title = '最近请求'" in open(
           os.path.join(_ROOT, "web", "components", "common", "gateway",
                        "RecentRequestsTable.tsx"), encoding="utf-8").read())
-# 积分列：用量页的全量账单表尾显示每次请求实际消耗（上游 credits）——
-# 仪表盘预览保持 12 列，只有用量页通过 showCredit 打开第 13 列。
+# 积分列：请求表（仪表盘「最近请求」与用量页「全部请求记录」共用）表尾显示
+# 每次请求实际消耗（上游 credits）——两处都要显示，不是可选列。
 _table36 = open(os.path.join(_ROOT, "web", "components", "common", "gateway",
                              "RecentRequestsTable.tsx"), encoding="utf-8").read()
-check("full-log table appends the per-request credit column (opt-in)",
-      "showCredit" in _table36 and "credit?: number" in _table36
-      and "积分" in _table36)
-check("usage page turns the credit column on",
-      "showCredit" in _usage_page36)
+check("request table always renders the per-request credit column (13 columns)",
+      "COLUMN_COUNT = 13" in _table36 and "credit?: number" in _table36
+      and "积分" in _table36 and "showCredit" not in _table36)
 check("credit column reads the upstream value, 0 stays plain-zero",
       "fmtCredit" in _table36 and "r.credit" in _table36)
 # 用量页的下拉框宽度必须够放「Token 消耗」（窄了会把文字截成「Token 消」）
@@ -4171,6 +4169,24 @@ for _root38, _dirs38, _files38 in os.walk(os.path.join(_ROOT, "qoder2api")):
                             _nm38, _fn38.name))
 check("函数内不再出现遮蔽模块级导入的局部 import",
       not _shadow38, _shadow38)
+
+print()
+print("[39] OAuth 设备授权弹窗：等待授权时链接/复制/打开按钮必须可点（曾整块置灰）")
+# 线上故障：弹窗打开后 phase=waiting（等用户在浏览器完成授权），而链接区块
+# 的禁用条件错用了包含 waiting 的 busy —— `pointer-events-none opacity-60`
+# 把整块盖住，链接和「在浏览器打开授权链接」全程灰的、点不动。
+_oauth39 = open(os.path.join(_ROOT, "web", "components", "common", "accounts",
+                             "OAuthDeviceDialog.tsx"), encoding="utf-8").read()
+check("链接区块只在「切换区域、新链接未到」时置灰（linkStale === starting）",
+      "const linkStale = phase === 'starting';" in _oauth39
+      and "linkStale && 'pointer-events-none opacity-60'" in _oauth39)
+check("复制按钮与打开链接按钮的禁用条件同样只跟 linkStale 走",
+      "disabled={linkStale}" in _oauth39
+      and "aria-disabled={linkStale}" in _oauth39
+      and "disabled={busy}" not in _oauth39)
+check("转圈/等待反馈仍由 busy 表达（不能用它来禁用链接区块）",
+      "{busy && <Loader2" in _oauth39
+      and "? `已等待 ${elapsed} 秒" in _oauth39)
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

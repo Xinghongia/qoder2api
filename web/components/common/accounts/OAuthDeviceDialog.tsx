@@ -221,6 +221,10 @@ export function OAuthDeviceDialog({
   };
 
   const busy = phase === 'starting' || phase === 'waiting';
+  // 链接区块的可点性：**只有**「切换区域、新链接还没拿到」时把上一区的旧
+  // 链接置灰禁用（防授错区）。waiting 时链接是刚拿到的，必须能点、能复制 ——
+  // 此前把 waiting 也算进禁用条件，弹窗一打开链接就是灰的、点不动。
+  const linkStale = phase === 'starting';
   // 进度条在「切换区域」期间也保持挂载（置 0%），否则它会整块卸载再挂上，
   // 居中的弹窗高度变化一次，看起来就是上下抖一下。
   const progressVisible = phase === 'starting' || phase === 'waiting';
@@ -272,7 +276,7 @@ export function OAuthDeviceDialog({
               </div>
 
               {authUrl && (
-                <div className={cn('mt-3 space-y-2', busy && 'pointer-events-none opacity-60')}>
+                <div className={cn('mt-3 space-y-2', linkStale && 'pointer-events-none opacity-60')}>
                   <div className="flex items-center gap-2">
                     <Input
                       readOnly
@@ -285,7 +289,7 @@ export function OAuthDeviceDialog({
                       size="sm"
                       variant="outline"
                       className="h-8 shrink-0 rounded-full"
-                      disabled={busy}
+                      disabled={linkStale}
                       onClick={() => void copyLink()}
                     >
                       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
@@ -297,7 +301,7 @@ export function OAuthDeviceDialog({
                     size="sm"
                     variant="outline"
                     className="h-8 rounded-full"
-                    aria-disabled={busy}
+                    aria-disabled={linkStale}
                   >
                     <a href={authUrl} target="_blank" rel="noopener noreferrer">
                       <ExternalLink className="size-3.5" />

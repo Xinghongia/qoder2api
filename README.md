@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.8-2496ED?style=flat-square" alt="Version 1.2.8">
+  <img src="https://img.shields.io/badge/Release-v1.2.9-2496ED?style=flat-square" alt="Version 1.2.9">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -435,6 +435,14 @@ qoder2api-hub/
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.9
+
+**积分列铺到仪表盘 + 修复 OAuth 设备授权弹窗链接整块置灰点不动**
+
+- **请求表新增「积分」列（仪表盘 + 用量页）**：「最近请求」与「全部请求记录」两张表（同一组件）表尾显示**每次请求实际消耗的积分**（上游响应用量块的 `credits`，与「积分消耗」KPI、按模型/按密钥明细同源）——为 0 表示本次未计费（免费模型），失败行显示 `—`，非零以琥珀色标出便于一眼找出"烧积分"的请求。（v1.2.8 先只在用量页开启，按反馈两处都显示。）
+- **OAuth 设备授权弹窗修复**：授权链接输入框 / 复制按钮 / 「在浏览器打开授权链接」此前在**等待授权**阶段也被 `pointer-events-none opacity-60` 盖住（禁用条件误把 waiting 算进 busy），表现为弹窗打开后链接全程灰的、按不动。现在只有「切换区域、新链接还没到」时才置灰旧链接（防授错区），等待阶段完全可点可复制。
+- 测试：605 PASS / 0 FAIL（新增 [39] 弹窗可点性静态断言；积分列断言改为"两处共用、恒显示"）。
 
 ### v1.2.8
 
