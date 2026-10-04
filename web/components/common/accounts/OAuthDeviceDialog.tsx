@@ -18,6 +18,7 @@ import {Progress} from '@/components/ui/progress';
 import {api, type Realm} from '@/lib/api';
 import {useRealm} from '@/lib/realm-context';
 import {notify} from '@/lib/toast';
+import {cn} from '@/lib/utils';
 
 /**
  * OAuth 设备授权登录（旧看板 dashboard.html 的 loginModal 行为基准）。
@@ -141,8 +142,10 @@ export function OAuthDeviceDialog({
       setPhase('starting');
       setError('');
       setCopied(false);
-      setAuthUrl('');
       setElapsed(0);
+      // 刻意**不清空 authUrl**：切换区域时把上一区的链接先留着（按钮禁用、
+      // 状态行提示「正在切换」），等新链接到达再替换。若在这里清空，链接区块
+      // （约 120px 高）会先塌陷再展开，看起来就是「闪一下」。
       setStatusText(
         target === 'cn'
           ? '正在向 qoder.com.cn（国内版）申请设备授权…'
@@ -180,6 +183,11 @@ export function OAuthDeviceDialog({
 
   React.useEffect(() => {
     if (!open) return;
+    // 每次**开窗**都从干净状态开始（切换区域走 chooseRealm，不清链接）
+    setAuthUrl('');
+    setElapsed(0);
+    setError('');
+    setPhase('idle');
     setRealm(viewRef.current); // 每次开窗跟随当前视图区域
     void start(viewRef.current);
     return () => {
@@ -261,7 +269,7 @@ export function OAuthDeviceDialog({
               </div>
 
               {authUrl && (
-                <div className="mt-3 space-y-2">
+                <div className={cn('mt-3 space-y-2', busy && 'pointer-events-none opacity-60')}>
                   <div className="flex items-center gap-2">
                     <Input
                       readOnly
@@ -274,13 +282,20 @@ export function OAuthDeviceDialog({
                       size="sm"
                       variant="outline"
                       className="h-8 shrink-0 rounded-full"
+                      disabled={busy}
                       onClick={() => void copyLink()}
                     >
                       {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                       {copied ? '已复制' : '复制'}
                     </Button>
                   </div>
-                  <Button asChild size="sm" variant="outline" className="h-8 rounded-full">
+                  <Button
+                    asChild
+                    size="sm"
+                    variant="outline"
+                    className="h-8 rounded-full"
+                    aria-disabled={busy}
+                  >
                     <a href={authUrl} target="_blank" rel="noopener noreferrer">
                       <ExternalLink className="size-3.5" />
                       在浏览器打开授权链接

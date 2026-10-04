@@ -70,11 +70,11 @@ export function AppDock() {
         aria-current={active(item.href) ? 'page' : undefined}
         className={cn(
           'grid size-full place-items-center rounded-full transition-colors',
-          // 选中态：亮底 + 常规前景色（原先的 bg-primary 是一整块深色圆，
-          // 在浅色主题下像一块黑补丁；改成浅色胶囊后图标更"透气"）。
+          // 选中态只调图标颜色（更醒目），不加底色：底栏整体是浅灰胶囊，
+          // 再垫一块白/深色圆会显脏；未选中压淡一档拉开层次。
           active(item.href)
-            ? 'bg-white text-foreground shadow-sm ring-1 ring-black/5 dark:bg-white/[0.14] dark:text-white dark:ring-white/10'
-            : 'text-neutral-600 hover:text-neutral-900 dark:text-neutral-300 dark:hover:text-white',
+            ? 'text-foreground dark:text-white'
+            : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200',
         )}
       >
         <item.icon className="size-4" />
@@ -91,8 +91,10 @@ export function AppDock() {
     customComponent: (
       <button
         type="button"
+        aria-label="添加账号"
+        title="添加账号（OAuth / 扫描 / PAT / JSON）"
         onClick={() => open('oauth')}
-        className="grid size-full place-items-center rounded-full text-neutral-600 transition-colors hover:text-neutral-900 dark:text-neutral-300 dark:hover:text-white"
+        className="grid size-full place-items-center rounded-full text-neutral-400 transition-colors hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200"
       >
         <PlusCircle className="size-4" />
       </button>

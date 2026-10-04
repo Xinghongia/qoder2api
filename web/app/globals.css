@@ -131,6 +131,18 @@
     scrollbar-gutter: stable;
   }
 
+  /*
+   * 弹层（Radix Select / Dialog 等）打开时会锁滚动，并给 html/body 补一笔
+   * `padding-right: <滚动条宽度>`。本站在 html 上已用 scrollbar-gutter 预留了
+   * 槽位，这笔补偿是多余的——它会把 `mx-auto` 的居中容器整体推左几像素
+   * （打开「网关默认出口」下拉时整页左移的根因）。直接中和：
+   * 本站 body 从不承担滚动，去掉它没有任何副作用。
+   */
+  html,
+  body {
+    padding-right: 0 !important;
+  }
+
   body {
     @apply bg-background text-foreground;
   }
