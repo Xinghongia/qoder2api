@@ -124,23 +124,37 @@
   }
 
   /*
-   * 滚动条出现/消失时不要顶动页面：始终预留滚动条槽位。
-   * 否则短页面与长页面互相切换时，整页内容会横向跳一下。
+   * 滚动条常驻，杜绝一切「滚动条出现/消失」引起的整页位移。
+   *
+   * 背景：Radix 的弹层（Select / Dialog）打开时用 react-remove-scroll 锁滚动
+   *       ——它把 overflow:hidden 传播到视口，滚动条随之消失；实测此时
+   *       scrollbar-gutter: stable 并不保留槽位（clientWidth 从 1248 涨到
+   *       1258），内容宽度变化、页面整体跳动。它给出的补偿（body 上
+   *       margin-right: <gap>）只在 gap 测量准确时才刚好抵消，单例样式表
+   *       还只在首次锁定时测量一次，非常脆。
+   * 做法：让 html 自己常驻滚动条（overflow-y: scroll），锁定时视口滚动条
+   *       不再消失；再把它的补偿中和掉（见下），于是任何状态下内容宽度、
+   *       居中位置、固定元素位置都完全一致。
    */
   html {
-    scrollbar-gutter: stable;
+    overflow-y: scroll !important;
   }
 
   /*
-   * 弹层（Radix Select / Dialog 等）打开时会锁滚动，并给 html/body 补一笔
-   * `padding-right: <滚动条宽度>`。本站在 html 上已用 scrollbar-gutter 预留了
-   * 槽位，这笔补偿是多余的——它会把 `mx-auto` 的居中容器整体推左几像素
-   * （打开「网关默认出口」下拉时整页左移的根因）。直接中和：
-   * 本站 body 从不承担滚动，去掉它没有任何副作用。
+   * 中和 react-remove-scroll 注入的滚动条补偿：它给 body 加
+   * `margin-right: <gap>px !important`（以及 padding-*），而滚动条已常驻，
+   * 再补偿一次会把内容整体挤左（这就是「打开下拉框整页左移」的根因）。
+   *
+   * 优先级说明：它运行时注入的是**无层** !important 规则；本规则位于
+   * @layer base —— CSS Cascade 5 里 important 声明反向比较层级，**分层
+   * 优先于无层**，因此这里能稳定压过它（实测 bodyMR 由 10px 变回 0px）。
    */
-  html,
-  body {
+  body[data-scroll-locked] {
+    margin-right: 0 !important;
+    margin-left: 0 !important;
     padding-right: 0 !important;
+    padding-left: 0 !important;
+    padding-top: 0 !important;
   }
 
   body {

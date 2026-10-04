@@ -221,6 +221,9 @@ export function OAuthDeviceDialog({
   };
 
   const busy = phase === 'starting' || phase === 'waiting';
+  // 进度条在「切换区域」期间也保持挂载（置 0%），否则它会整块卸载再挂上，
+  // 居中的弹窗高度变化一次，看起来就是上下抖一下。
+  const progressVisible = phase === 'starting' || phase === 'waiting';
   const progress =
     phase === 'waiting' ? Math.min(96, Math.round((elapsed / TTL_SECONDS) * 100)) : 0;
 
@@ -301,11 +304,13 @@ export function OAuthDeviceDialog({
                       在浏览器打开授权链接
                     </a>
                   </Button>
-                  {phase === 'waiting' && (
+                  {progressVisible && (
                     <div className="space-y-1.5 pt-1">
-                      <Progress value={progress} className="h-1.5" />
+                      <Progress value={phase === 'waiting' ? progress : 0} className="h-1.5" />
                       <p className="text-[11px] text-muted-foreground">
-                        已等待 {elapsed} 秒 · 授权链接 10 分钟内有效，完成后自动加入账号池
+                        {phase === 'waiting'
+                          ? `已等待 ${elapsed} 秒 · 授权链接 10 分钟内有效，完成后自动加入账号池`
+                          : '正在申请新的授权链接…'}
                       </p>
                     </div>
                   )}
