@@ -3895,5 +3895,98 @@ check("pro batch: credit_added counts only fresh grants + already_count exposed"
        _batch_already34.get("already_count")))
 
 print()
+print("[35] usage stats page: SQLite aggregate wiring + key dimension + recent cap")
+_src35 = _ALL_SRC
+check("/usage/stats route exposes range/realm/group/granularity",
+      'if path == "/usage/stats":' in _src35
+      and 'range must be today / 7d / 30d / custom' in _src35
+      and "usagedb.stats(" in _src35)
+check("/usage/recent caps the page size at 100 (dashboard shows at most 100)",
+      'min(100, int((query.get("limit")' in _src35)
+check("record_usage carries the API key id/name into the JSONL row",
+      "key_id" in _src35 and "key_name" in _src35
+      and "def record_usage(model, usage, stream=None, elapsed_ms=None, "
+          "ttft_ms=None,\n                 gen_ms=None, fp=None, account=None, "
+          "key=None)" in _src35)
+check("record_error also records key + realm (failures stay attributable)",
+      "def record_error(model, status, message, elapsed_ms=None, key=None, "
+      "realm=None)" in _src35)
+# 两个主链路（chat / responses）都必须把 key 传下去：漏传会静默退化成
+# 「未绑定 Key」，统计页看不出来是代码问题。
+check("both chat and responses routes pass the key through",
+      _src35.count("key=key") >= 16, _src35.count("key=key"))
+check("upstream usage block reads the plural 'credits' field (billing)",
+      'usage.get("credits") or usage.get("credit")' in _src35)
+check("cli boots the usage db and backfills in the background",
+      "usagedb.db_path()" in _src35 and "threading.Thread(target=usagedb.sync" in _src35)
+
+_gitignore35 = open(os.path.join(_ROOT, ".gitignore"), encoding="utf-8").read()
+check(".gitignore anchors the runtime usage dir to the repo root",
+      "\n/usage/\n" in _gitignore35)
+_lines35 = [l.strip() for l in _gitignore35.splitlines()]
+check("no bare 'usage/'/'accounts/' rule (would swallow web routes named the same)",
+      "usage/" not in _lines35 and "accounts/" not in _lines35, _lines35[:8])
+
+# 页面/组件源码断言：60 秒自动刷新 + 时间范围四档 + 三个分组
+_usage_page35 = ""
+try:
+    _usage_page35 = open(os.path.join(
+        _ROOT, "web", "app", "(main)", "usage", "page.tsx"), encoding="utf-8").read()
+except OSError:
+    pass
+check("usage page auto-refreshes every 60s and skips hidden tabs",
+      "AUTO_REFRESH_MS = 60_000" in _usage_page35
+      and "visibilityState" in _usage_page35)
+check("usage page offers today / 7d / 30d / custom ranges",
+      "{value: 'today', label: '今天'}" in _usage_page35
+      and "'7d'" in _usage_page35 and "'30d'" in _usage_page35
+      and "'custom'" in _usage_page35 and 'type="date"' in _usage_page35)
+
+print()
+print("[36] usage page shows the FULL request log (dashboard keeps the 100-row preview)")
+_src36 = _ALL_SRC
+check("/usage/recent total comes from the SQLite aggregate (no full JSONL scan per page)",
+      "usagedb.count_requests(" in _src36
+      and "total=total" in _src36
+      and "def count_requests(realm=\"\")" in _src36)
+check("recent_usage accepts a precomputed total and falls back to a scan",
+      "def recent_usage(limit=100, realm=None, page=1, total=None)" in _src36
+      and "total = count_usage_rows(realm)" in _src36)
+check("usagedb counts failed rows too (matches the row list)",
+      'out["requests"] = 1' in _src36 and 'out["failed"] = 1' in _src36)
+check("usagedb realm attribution falls back to exclusive models, like usage.py",
+      "exclusive_realm" in _src36)
+_usage_page36 = ""
+try:
+    _usage_page36 = open(os.path.join(
+        _ROOT, "web", "app", "(main)", "usage", "page.tsx"), encoding="utf-8").read()
+except OSError:
+    pass
+check("usage page embeds the full request table",
+      "<RecentRequestsTable" in _usage_page36
+      and 'title="全部请求记录"' in _usage_page36)
+_page_dash36 = ""
+try:
+    _page_dash36 = open(os.path.join(
+        _ROOT, "web", "app", "(main)", "page.tsx"), encoding="utf-8").read()
+except OSError:
+    pass
+check("dashboard marks its request table as the latest-100 preview",
+      'hint="仅显示最新 100 条"' in _page_dash36)
+check("shared table defaults to the plain 最近请求 title",
+      "title = '最近请求'" in open(
+          os.path.join(_ROOT, "web", "components", "common", "gateway",
+                       "RecentRequestsTable.tsx"), encoding="utf-8").read())
+# 用量页的下拉框宽度必须够放「Token 消耗」（窄了会把文字截成「Token 消」）
+_trend36 = open(os.path.join(_ROOT, "web", "components", "common", "usage",
+                             "UsageTrendCard.tsx"), encoding="utf-8").read()
+check("trend metric/group selects are wide enough for their labels",
+      "w-[136px]" in _trend36 and "w-[110px]" not in _trend36)
+_break36 = open(os.path.join(_ROOT, "web", "components", "common", "usage",
+                             "BreakdownPanel.tsx"), encoding="utf-8").read()
+check("breakdown empty state sits in a fixed-height centred box",
+      "min-h-[200px] place-items-center" in _break36)
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

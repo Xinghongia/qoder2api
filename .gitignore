@@ -4,7 +4,11 @@ accounts/*
 !accounts/README.txt
 
 # 运行时数据：请求流水与指标快照
-usage/
+# 必须写成 /usage/（带前导斜杠 = 只锚定仓库根）：
+# 不带斜杠的 `usage/` 会匹配**任意层级**同名目录，把前端路由
+# web/app/(main)/usage/、web/components/common/usage/、web/out/usage/
+# 一并忽略（git 不跟踪 + Tailwind 扫描器跳过 → 新页面样式整块丢失）。
+/usage/
 
 # ---- Python 运行产物 ----
 __pycache__/

@@ -5,6 +5,7 @@ import {usePathname} from 'next/navigation';
 import {
   BarChart3,
   Boxes,
+  Gauge,
   KeyRound,
   LayoutDashboard,
   Moon,
@@ -29,6 +30,7 @@ const NAV = [
   {href: '/accounts', title: '账号', icon: Users, group: '运营'},
   {href: '/keys', title: '密钥', icon: KeyRound, group: '运营'},
   {href: '/models', title: '模型', icon: Boxes, group: '运营'},
+  {href: '/usage', title: '用量', icon: Gauge, group: '治理'},
   {href: '/stats', title: '统计', icon: BarChart3, group: '治理'},
   {href: '/logs', title: '日志', icon: ScrollText, group: '治理'},
   {href: '/settings', title: '设置', icon: SettingsIcon, group: '治理'},

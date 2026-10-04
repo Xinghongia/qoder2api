@@ -101,7 +101,10 @@ check("接口请求带 application/json 时不误判",
 check("/logs 存在导出页面（导航时该重定向）", S.page_exists("/logs"))
 check("/stats 存在导出页面", S.page_exists("/stats"))
 check("/accounts 现在也有页面（账号页与接口同名）", S.page_exists("/accounts"))
-check("/usage 没有页面（纯接口）", not S.page_exists("/usage"))
+check("/usage 现在也有页面（用量统计页与接口同名，同 /logs 的处理）",
+      S.page_exists("/usage"))
+check("/usage/stats 仍归接口（无尾斜杠前缀命中，静态层必须让路）",
+      S.api_takes_path("/usage/stats") and not S.api_takes_path("/usage/"))
 check("/v1/models 没有页面（仍归接口）", not S.page_exists("/v1/models"))
 
 print()

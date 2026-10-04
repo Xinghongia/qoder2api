@@ -36,6 +36,8 @@ class ResponsesRoutesMixin(object):
         chat_req = responses_to_chat(payload)
         model = payload.get("model") or "auto"
         want_stream = bool(payload.get("stream"))
+        # 本次请求所用的 API Key（面板会话/未开鉴权时为空）：用量统计按密钥维度靠它
+        key = self.key_entry
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         log("responses: model=%s stream=%s msgs=%d effort=%r custom_tools=%s"
@@ -55,7 +57,7 @@ class ResponsesRoutesMixin(object):
                 chat_req, session_key=session_key, target_realm=req_realm)
         except RateLimited as exc:
             t = time.time() - t_start
-            record_error(model, 429, exc.detail[:200],
+            record_error(model, 429, exc.detail[:200], key=key,
                          elapsed_ms=int(t * 1000))
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
@@ -67,13 +69,13 @@ class ResponsesRoutesMixin(object):
                     detail = exc.read(600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
-            record_error(model, exc.code, detail,
+            record_error(model, exc.code, detail, key=key,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             msg, etype = friendly_upstream_error(exc.code, detail)
             return self._error(exc.code, msg, etype)
         except Exception as exc:
             message = str(exc)
-            record_error(model, 502, message,
+            record_error(model, 502, message, key=key,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             if message.startswith("no usable account"):
                 return self._error(503, self._no_account_message(message))
@@ -116,7 +118,7 @@ class ResponsesRoutesMixin(object):
                                          elapsed_ms=wall, ttft_ms=first_ms,
                                          gen_ms=(wall - first_ms)
                                          if first_ms is not None else None,
-                                         fp=fp, account=account.uid)
+                                         fp=fp, account=account.uid, key=key)
                             return
                         except UpstreamStatus as exc:
                             # 控制帧（response.created 等）先于数据，不能算
@@ -161,7 +163,7 @@ class ResponsesRoutesMixin(object):
                         except Exception:
                             pass
                 if pump_exc is not None:
-                    record_error(model, pump_exc.status, pump_exc.detail,
+                    record_error(model, pump_exc.status, pump_exc.detail, key=key,
                                  elapsed_ms=int((time.time() - t_start) * 1000))
                     msg, _ = friendly_upstream_error(
                         _to_int_status(pump_exc.status), pump_exc.detail)
@@ -182,25 +184,25 @@ class ResponsesRoutesMixin(object):
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms)
                              if first_ms is not None else None,
-                             fp=fp, account=account.uid)
+                             fp=fp, account=account.uid, key=key)
                 return
             try:
                 chat_obj, account = aggregate_with_envelope_retry(
                     upstream, chat_req, session_key, req_realm, model,
                     holder, account)
             except UpstreamStatus as exc:
-                record_error(model, exc.status, exc.detail,
+                record_error(model, exc.status, exc.detail, key=key,
                              elapsed_ms=int((time.time() - t_start) * 1000))
                 msg, etype = friendly_upstream_error(_to_int_status(exc.status),
                                                      exc.detail)
                 return self._error(exc.status if str(exc.status).isdigit() else 502,
                                    msg, etype)
             except Exception as exc:
-                record_error(model, 502, str(exc),
+                record_error(model, 502, str(exc), key=key,
                              elapsed_ms=int((time.time() - t_start) * 1000))
                 return self._error(502, "upstream stream error: %s" % exc)
             wall = int((time.time() - t_start) * 1000)
             result = chat_to_response(chat_obj, model, custom_names)
-            record_usage(model, chat_obj.get("usage"), stream=False,
+            record_usage(model, chat_obj.get("usage"), stream=False, key=key,
                          elapsed_ms=wall, fp=fp, account=account.uid)
             return self._json(200, result)

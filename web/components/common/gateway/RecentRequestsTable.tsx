@@ -100,7 +100,17 @@ function pageList(current: number, total: number): Array<number | '...'> {
   return pages;
 }
 
-export function RecentRequestsTable({realm}: {realm: Realm}) {
+export function RecentRequestsTable({
+  realm,
+  title = '最近请求',
+  hint,
+}: {
+  realm: Realm;
+  /** 卡片标题：仪表盘用默认「最近请求」；用量页用「全部请求记录」。 */
+  title?: string;
+  /** 标题旁的小字说明（如「全部历史，可翻页」）。 */
+  hint?: string;
+}) {
   // limit 为 null 表示「本地偏好还没读出来」：先不发请求，读出来后只发一次。
   const [limit, setLimit] = React.useState<number | null>(null);
   const [page, setPage] = React.useState(1);
@@ -175,7 +185,8 @@ export function RecentRequestsTable({realm}: {realm: Realm}) {
     <section className="overflow-hidden rounded-[20px] bg-muted">
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 pb-2 pt-3">
         <div className="flex flex-wrap items-baseline gap-2">
-          <h2 className="text-sm font-medium">最近请求</h2>
+          <h2 className="text-sm font-medium">{title}</h2>
+          {hint && <span className="text-[11px] text-muted-foreground">{hint}</span>}
           <span className="text-[11px] text-muted-foreground">
             (第 {page} 页 / 共 {fmt(total)} 条)
           </span>

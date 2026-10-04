@@ -46,7 +46,10 @@ def _extract_usage(usage):
         "cached_tokens": usage.get("prompt_cache_hit_tokens")
         or details.get("cached_tokens") or prompt_details.get("cached_tokens") or 0,
         "total_tokens": usage.get("total_tokens") or 0,
-        "credit": usage.get("credit") or 0,
+        # 上游用量块里的计费字段是**复数** credits（实测：
+        # {"credits":0.1427...,"original_credits":0.1427...}）；老版本/其它
+        # 形态若发单数 credit 也接受。此前只读单数，导致积分统计恒为 0。
+        "credit": usage.get("credits") or usage.get("credit") or 0,
     }
 
 
@@ -68,8 +71,13 @@ def row_matches_realm(row, realm):
 
 
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
-                 gen_ms=None, fp=None, account=None):
-    """Accumulate stats, append a JSONL row, and persist the summary."""
+                 gen_ms=None, fp=None, account=None, key=None):
+    """Accumulate stats, append a JSONL row, and persist the summary.
+
+    key：本次请求所用的 API Key 条目（api/base.py 的 key_entry）。有值时把
+    key_id/key_name 写进行内——用量统计的「按密钥维度」全靠它；面板会话或
+    未开启鉴权时为空（统计里显示为「未绑定 Key」）。
+    """
     fields = _extract_usage(usage)
     if not fields:
         return None
@@ -87,6 +95,9 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
         row.update(fp)
     if account:
         row["account"] = account
+    if key:
+        row["key_id"] = str(key.get("id") or "")
+        row["key_name"] = str(key.get("name") or "")
     acc = runtime.POOL.get(account) if (account and runtime.POOL) else None
     row["realm"] = acc.realm if acc else runtime.CURRENT_REALM
     if gen_ms and gen_ms > 0:
@@ -167,8 +178,12 @@ def _persist_usage(row, summary, fail_label):
         log("%s: %s" % (fail_label, exc))
 
 
-def record_error(model, status, message, elapsed_ms=None):
-    """Count a failed request and append it to the log so errors are visible."""
+def record_error(model, status, message, elapsed_ms=None, key=None, realm=None):
+    """Count a failed request and append it to the log so errors are visible.
+
+    key/realm 与 record_usage 同义（失败行也要能按密钥/区域统计）：
+    realm 未显式给出时按「Key 绑定的出口 > 网关当前出口」推断。
+    """
     row = {
         "at": time.time(),
         "iso": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -178,7 +193,11 @@ def record_error(model, status, message, elapsed_ms=None):
         # 保留更完整的上游错误（provider_error 的内层 details 常在 200+ 字节）
         "message": str(message)[:400],
         "elapsed_ms": elapsed_ms,
+        "realm": realm or (key or {}).get("realm") or runtime.CURRENT_REALM,
     }
+    if key:
+        row["key_id"] = str(key.get("id") or "")
+        row["key_name"] = str(key.get("name") or "")
     with _lock:
         _usage["errors"] += 1
         if elapsed_ms is not None:
@@ -538,8 +557,13 @@ def count_usage_rows(realm=None):
     return n
 
 
-def recent_usage(limit=100, realm=None, page=1):
-    """Paginated rows from the tail of the log (page 1 is latest)."""
+def recent_usage(limit=100, realm=None, page=1, total=None):
+    """Paginated rows from the tail of the log (page 1 is latest).
+
+    total：可选的**已算好**的总行数（如来自 usagedb 的 SQLite 计数）。
+    不给时退回逐行扫描 JSONL 的 count_usage_rows —— 那个每次翻页都要过一遍
+    整份日志（几十万行会很慢），所以调用方（/usage/recent）优先传 usagedb 的值。
+    """
     try:
         limit = max(1, int(limit))
     except Exception:
@@ -548,7 +572,13 @@ def recent_usage(limit=100, realm=None, page=1):
         page = max(1, int(page))
     except Exception:
         page = 1
-    total = count_usage_rows(realm)
+    if total is None:
+        total = count_usage_rows(realm)
+    else:
+        try:
+            total = max(0, int(total))
+        except Exception:
+            total = count_usage_rows(realm)
     total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
     page = min(page, total_pages)
     target_count = page * limit

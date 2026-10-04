@@ -144,7 +144,7 @@ export default function DashboardPage() {
         )}
       </section>
 
-      <RecentRequestsTable realm={view} />
+      <RecentRequestsTable realm={view} hint="仅显示最新 100 条" />
     </div>
   );
 }

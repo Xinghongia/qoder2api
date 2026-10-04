@@ -224,6 +224,17 @@ def main():
     log("catalog    : %s" % (BASEPROMPT_PATH if BASEPROMPT
                              else "baseprompt.json MISSING"))
 
+    # 用量统计库（SQLite 聚合）：确保库文件可用，并在后台把 JSONL 里尚未
+    # 导入的行补上（首次会全量回放历史，大文件也不拖慢启动；读取路径也会
+    # 按需增量同步，所以后台这次只是让统计页首屏更快）。
+    try:
+        from . import usagedb
+        log("usage db   : %s" % usagedb.db_path())
+        threading.Thread(target=usagedb.sync, daemon=True).start()
+    except Exception as exc:
+        log("usage db   : 初始化失败（统计页不可用，其余功能不受影响）: %s"
+            % exc, level="WARN")
+
     if args.host == "0.0.0.0":
         ips = local_ip_addresses() or ["<this-pc-ip>"]
         print()

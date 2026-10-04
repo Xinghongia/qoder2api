@@ -163,7 +163,8 @@ class GetRoutesMixin(object):
             if not self._authorized():
                 return
             try:
-                limit = max(1, min(1000, int((query.get("limit") or ["100"])[0])))
+                # 上限 100：看板「最近请求」最多显示 100 条（分页在服务端完成）
+                limit = max(1, min(100, int((query.get("limit") or ["100"])[0])))
             except ValueError:
                 limit = 100
             try:
@@ -172,7 +173,55 @@ class GetRoutesMixin(object):
                 page = 1
             req_realm = query.get("realm", [None])[0] \
                 or self.headers.get("X-Realm") or runtime.CURRENT_REALM
-            return self._json(200, recent_usage(limit, realm=req_realm, page=page))
+            # 总条数优先用 SQLite 聚合库（SUM(requests)）——逐行扫描整份 JSONL
+            # 在几十万行时会明显拖慢翻页；统计库不可用时回退旧的全扫口径。
+            try:
+                from .. import usagedb
+                total = usagedb.count_requests(req_realm)
+            except Exception as exc:
+                log("recent total via usagedb failed, scanning jsonl: %s" % exc,
+                    level="WARN")
+                total = None
+            return self._json(200, recent_usage(limit, realm=req_realm, page=page,
+                                                total=total))
+        if path == "/usage/stats":
+            # 用量统计页（/usage）：SQLite 聚合库 + 任意时间范围/模型/密钥维度。
+            # range=today|7d|30d|custom（custom 需 from/to=YYYY-MM-DD）；
+            # realm 省略或非 cn/intl 时统计全部区域。
+            if not self._authorized():
+                return
+            from .. import usagedb
+            range_key = (query.get("range") or ["today"])[0]
+            today = time.strftime("%Y-%m-%d")
+            if range_key == "today":
+                from_day = to_day = today
+            elif range_key in ("7d", "30d"):
+                span = 7 if range_key == "7d" else 30
+                from_day = time.strftime(
+                    "%Y-%m-%d", time.localtime(time.time() - (span - 1) * 86400))
+                to_day = today
+            elif range_key == "custom":
+                from_day = (query.get("from") or [""])[0]
+                to_day = (query.get("to") or [""])[0] or today
+            else:
+                return self._error(400, "range must be today / 7d / 30d / custom",
+                                   "invalid_request_error")
+            req_realm = (query.get("realm", [None])[0]
+                         or self.headers.get("X-Realm") or "").strip().lower()
+            if req_realm not in ("cn", "intl"):
+                req_realm = ""          # 全部区域
+            group = (query.get("group") or ["total"])[0]
+            granularity = (query.get("granularity") or ["auto"])[0]
+            try:
+                data = usagedb.stats(from_day, to_day, realm=req_realm,
+                                     group=group, granularity=granularity)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            except Exception as exc:
+                log("usage stats failed: %s" % exc, level="ERROR")
+                return self._error(500, "usage stats unavailable: %s" % exc,
+                                   "server_error")
+            return self._json(200, data)
         if path == "/accounts/credits":
             if not self._authorized():
                 return

@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.6-2496ED?style=flat-square" alt="Version 1.2.6">
+  <img src="https://img.shields.io/badge/Release-v1.2.7-2496ED?style=flat-square" alt="Version 1.2.7">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -333,6 +333,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
 | GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
 | GET | /usage/daily | 按天汇总（仪表盘 14 天趋势；`days=` 1-90，`realm=` 过滤） |
+| GET | /usage/stats | 用量统计（SQLite 聚合库；`range=today\|7d\|30d\|custom` + `from`/`to`，`group=total\|model\|key_id`，`granularity=auto\|hour\|day`，`realm=` 过滤） |
 | GET | /identity/export | 导出本机机器身份（面板鉴权；给没有官方客户端的服务器固定用） |
 
 ---
@@ -340,7 +341,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 ## 六、开发与测试
 
 ```bash
-# 离线确定性测试（559 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
+# 离线确定性测试（570 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
 # 自定义 B64、COSY 签名、双区官方目录全字段（峰谷价/多窗口/思考档位/展示 id/解析）、
 # 独占路由、签到能力运行时探测与 DISABLED 归一化、活动平台归一化（含同人去重
 # BLOCKED）、成就门控任务行、虚拟化状态映射、版本检测三态、面板短缓存命中/失效、
@@ -348,6 +349,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 # 本机凭证扫描、券类兑换码落盘/中文活动名/全部账号聚合/信封层 403-10605 冷却、
 # 泄漏工具调用回读与截断吞掉（issue #8/#9）、机器头门控与 INTL 已知限制提示（#10）、
 # Responses 续号/终态事件、调度器状态落盘与启动补签闸门、Pro 领取幂等）
+# （用量统计 SQLite 聚合单独一套：python tests/test_usagedb.py，26 项断言）
 python tests/test_qoder.py
 
 # 官方 fixture（credential/model-cache KAT）不在本机时自动 SKIP；可用环境变量指定
@@ -392,14 +394,14 @@ qoder2api-hub/
 ├─ qoder2api/             # 后端包（纯标准库，零第三方依赖）
 │  ├─ cli.py paths.py runtime.py            # 入口 / 路径 / 可变运行态
 │  ├─ security.py auth.py realm.py          # 鉴权、CORS、区域路由
-│  ├─ usage.py views.py logbus.py           # 用量统计、面板视图、日志总线
+│  ├─ usage.py usagedb.py views.py logbus.py  # 用量记账（JSONL 真源）+ SQLite 聚合统计库、面板视图、日志总线
 │  ├─ models.py model_entry.py catalog.py   # 模型目录与逐字段元数据
 │  ├─ body.py sanitize.py reasoning.py chat_normalize.py  # 请求构建与归一化
 │  ├─ upstream.py responses.py              # 上游调用/重试/SSE、Responses 转换
 │  ├─ accounts.py tasks.py scheduler.py settings.py net.py sign.py fingerprint.py
 │  ├─ assets/             # baseprompt.json + 双区模型快照 JSON
 │  └─ api/                # HTTP 层：base(公共) + routes_get/post + 各业务路由
-├─ tests/                 # test_qoder.py（离线确定性）、test_static.py
+├─ tests/                 # test_qoder.py / test_static.py / test_usagedb.py（离线确定性）
 ├─ scripts/               # _diag_gateway / _diag_campaign / _refresh_catalog / _verify_models
 ├─ web/                   # 前端（Next.js 15 + React 19 + TS + Tailwind v4 + shadcn/ui）
 │  └─ out/                # 构建产物（入库；后端直接托管，最终用户无需 Node）
@@ -431,6 +433,18 @@ qoder2api-hub/
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.7
+
+**新增「用量统计」页（SQLite 持久化，按时间 / 模型 / 密钥维度）**
+
+- **页面**：底栏「治理」组新增「用量」（在「统计」左侧，`/usage`）。时间范围 `今天`（按小时）/ `近 7 天` / `近 30 天` / `自定义`（起止日期，跨度上限 400 天）；顶部 4 张 KPI（请求数、Token 消耗、缓存命中率、积分消耗，后者含平均 tokens/请求）；趋势卡片可切 **Token 消耗 / 请求量** 与 **总量 / 按模型 / 按密钥**（当日 = 柱状、末柱高亮；按天 = 面积；多序列堆叠并折叠「其他」；请求量视图叠一条失败虚线）；下方「按模型」「按密钥」明细表（彩色圆点 + 占比进度条，列为请求数 / Token（输入·输出）/ 积分）。**每 60 秒自动刷新**（标签页隐藏时跳过，切回立即补一次），区域跟随右上角的国际版/国内版切换。
+- **存储**：`usage/usage.db`（stdlib `sqlite3`，WAL）。`usage.jsonl` 仍是**唯一真源**（追加写），统计库是它的**增量投影**：按字节 offset 只导入新行、`usage_daily` + `usage_hourly` 双粒度 UPSERT 累加，聚合行与 offset **同事务**提交（崩溃只会回滚，绝不重复计数）；文件被截断/轮转时把 offset 夹回文件末尾并告警（宁丢一段历史也不二次累加）；导入遇半行（进程被杀）自动停下等下一轮补。**无限期保留**（每「天×区域×模型×密钥」一行，一年也就几千行）。统计库损坏可直接删掉重建（下次查询自动从 JSONL 全量重放，`usagedb.rebuild()` 亦可主动重建）。
+- **密钥维度**：请求行新增 `key_id` / `key_name`（取自本次请求所用的 API Key，面板会话/未开鉴权为空 → 统计里显示「未绑定 Key」）；失败行同样带密钥与区域（按「Key 绑定出口 > 网关当前出口」归属），失败请求也能按密钥/区域统计。
+- **全部请求记录**：页面底部内嵌**完整**请求日志表（与仪表盘同一张表，服务端分页，可一路翻到底）——仪表盘的「最近请求」只是最近 100 条的预览，**所有历史记录都在这一页看**。分页总数改由 SQLite 聚合库求和（`SUM(requests)`），不再每次翻页逐行扫描 JSONL（几十万行时会明显拖慢）；统计库不可用时自动回退旧的全扫口径。
+- **接口**：`GET /usage/stats?range=today|7d|30d|custom&from=&to=&realm=&group=total|model|key_id&granularity=auto|hour|day`（面板鉴权）→ `{range, summary, by_model, by_key, trend}`；`granularity=auto` 时跨度 ≤2 天按小时、其余按天。`GET /usage/recent` 的每页上限由 1000 收紧到 **100**（单页最多 100 条；总条数与翻页不受限，看全量走用量页）。
+- **顺带修复**：用量行的计费字段此前只读单数 `credit`，而上游实际发的是复数 `credits` —— 所有请求的积分消耗被记成 0（统计页「积分消耗」因此恒为 0）；现已兼容两种写法。
+- **构建陷阱修复**：`.gitignore` 里的 `usage/`（无前导斜杠）会匹配**任意层级**的同名目录，把前端路由 `web/app/(main)/usage/`、`web/components/common/usage/`、`web/out/usage/` 一并忽略——文件不入库，且 Tailwind 扫描器跳过该目录，新页面的工具类整块不进 CSS（表现为卡片塌陷、图表 0 高度）。已改为锚定仓库根的 `/usage/`，并加断言防回归。
 
 ### v1.2.6
 

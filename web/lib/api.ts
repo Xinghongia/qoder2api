@@ -242,6 +242,29 @@ export const api = {
     /** 按天汇总（仪表盘趋势图）：{days: [{date, day, requests, tokens, failed, credit}]} */
     daily: (days: number = 14, realm?: string) =>
       http.get(`/usage/daily?days=${days}${realm ? `&realm=${realm}` : ''}`),
+    /**
+     * 用量统计页（/usage）：SQLite 聚合库 + 任意时间范围/模型/密钥维度。
+     * range=today|7d|30d|custom（custom 需 from/to=YYYY-MM-DD）；
+     * group=total|model|key_id（趋势分组）；granularity=auto|hour|day。
+     */
+    stats: (params: {
+      range: 'today' | '7d' | '30d' | 'custom';
+      from?: string;
+      to?: string;
+      realm?: string;
+      group?: 'total' | 'model' | 'key_id';
+      granularity?: 'auto' | 'hour' | 'day';
+    }) => {
+      const q = new URLSearchParams({range: params.range});
+      if (params.from) q.set('from', params.from);
+      if (params.to) q.set('to', params.to);
+      if (params.realm) q.set('realm', params.realm);
+      if (params.group) q.set('group', params.group);
+      if (params.granularity && params.granularity !== 'auto') {
+        q.set('granularity', params.granularity);
+      }
+      return http.get(`/usage/stats?${q.toString()}`);
+    },
   },
   tasks: () => http.get('/tasks'),
   tasksRun: (uid?: string) => http.post('/tasks/run', uid ? {uid} : {}),

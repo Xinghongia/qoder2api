@@ -79,6 +79,8 @@ class PostRoutesMixin(object):
         # 转换统一在 build_qoder_body 内做（压平/清洗/工具）
         session_key = extract_session_key(self.headers, payload)
         fp = prompt_fingerprint(payload.get("messages"))
+        # 本次请求所用的 API Key（面板会话/未开鉴权时为空）：用量统计按密钥维度靠它
+        key = self.key_entry
         t_start = time.time()
         effort = payload.get("reasoning_effort") or \
             (payload.get("reasoning") or {}).get("effort") \
@@ -97,7 +99,7 @@ class PostRoutesMixin(object):
             upstream, account, _ = upstream_mod.open_upstream(payload, session_key=session_key,
                                                  target_realm=req_realm)
         except RateLimited as exc:
-            record_error(model, 429, exc.detail[:200],
+            record_error(model, 429, exc.detail[:200], key=key,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
@@ -109,13 +111,13 @@ class PostRoutesMixin(object):
                     detail = exc.read(600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
-            record_error(model, exc.code, detail,
+            record_error(model, exc.code, detail, key=key,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             msg, etype = friendly_upstream_error(exc.code, detail)
             return self._error(exc.code, msg, etype)
         except Exception as exc:
             message = str(exc)
-            record_error(model, 502, message,
+            record_error(model, 502, message, key=key,
                          elapsed_ms=int((time.time() - t_start) * 1000))
             if message.startswith("no usable account"):
                 return self._error(503, self._no_account_message(message))
@@ -154,7 +156,7 @@ class PostRoutesMixin(object):
                                          elapsed_ms=wall, ttft_ms=first_ms,
                                          gen_ms=(wall - first_ms)
                                          if first_ms is not None else None,
-                                         fp=fp, account=account.uid)
+                                         fp=fp, account=account.uid, key=key)
                             return
                         except UpstreamStatus as exc:
                             _handle_envelope_account_cooldown(
@@ -195,7 +197,8 @@ class PostRoutesMixin(object):
                 if pump_exc is not None:
                     exc = pump_exc
                     wall = int((time.time() - t_start) * 1000)
-                    record_error(model, exc.status, exc.detail, elapsed_ms=wall)
+                    record_error(model, exc.status, exc.detail, key=key,
+                                 elapsed_ms=wall)
                     msg, etype = friendly_upstream_error(
                         _to_int_status(exc.status), exc.detail)
                     err = json.dumps({"error": {
@@ -220,14 +223,14 @@ class PostRoutesMixin(object):
                              elapsed_ms=wall, ttft_ms=first_ms,
                              gen_ms=(wall - first_ms)
                              if first_ms is not None else None,
-                             fp=fp, account=account.uid)
+                             fp=fp, account=account.uid, key=key)
                 return
             try:
                 result, account = aggregate_with_envelope_retry(
                     upstream, payload, session_key, req_realm, model,
                     holder, account)
             except UpstreamStatus as exc:
-                record_error(model, exc.status, exc.detail,
+                record_error(model, exc.status, exc.detail, key=key,
                              elapsed_ms=int((time.time() - t_start) * 1000))
                 code = exc.status if str(exc.status).isdigit() else 502
                 try:
@@ -240,7 +243,7 @@ class PostRoutesMixin(object):
                     _to_int_status(exc.status), exc.detail)
                 return self._error(code, msg, etype)
             except Exception as exc:
-                record_error(model, 502, str(exc),
+                record_error(model, 502, str(exc), key=key,
                              elapsed_ms=int((time.time() - t_start) * 1000))
                 return self._error(502, "upstream stream error: %s" % exc)
             wall = int((time.time() - t_start) * 1000)
@@ -249,5 +252,5 @@ class PostRoutesMixin(object):
             record_usage(model, result.get("usage"), stream=False,
                          elapsed_ms=wall, ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
-                         fp=fp, account=account.uid)
+                         fp=fp, account=account.uid, key=key)
             return self._json(200, result)
