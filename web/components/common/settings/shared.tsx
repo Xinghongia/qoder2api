@@ -52,6 +52,8 @@ export interface ProxyView {
 
 export interface SettingsSnapshot {
   panel_password_is_default: boolean;
+  /** 面板登录账号（GET /settings 返回，默认 admin）。 */
+  panel_username?: string;
   api_key_set: boolean;
   api_key_set_by_panel: boolean;
   api_key_masked: string;

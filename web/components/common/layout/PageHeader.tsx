@@ -9,7 +9,8 @@ export function PageHeader({
   actions,
 }: {
   title: string;
-  description?: string;
+  /** 字符串或行内 JSX（如带 <Link> 的引导语） */
+  description?: ReactNode;
   actions?: ReactNode;
 }) {
   return (

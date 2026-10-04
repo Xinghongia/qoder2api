@@ -4,22 +4,34 @@ import Link from 'next/link';
 import {usePathname} from 'next/navigation';
 import {
   BarChart3,
+  Boxes,
+  KeyRound,
+  LayoutDashboard,
   Moon,
+  PlusCircle,
   ScrollText,
-  Server,
   Settings as SettingsIcon,
   Sun,
+  Users,
 } from 'lucide-react';
 import {useTheme} from 'next-themes';
 
 import {FloatingDock, type FloatingDockItem} from '@/components/ui/floating-dock';
+import {useAddAccount} from '@/lib/add-account-context';
 import {cn} from '@/lib/utils';
 
+/**
+ * 底部管理栏：分组与 workbuddy-manager 一致 —— 总览 / 运营 / 治理 / 动作，
+ * 组间由 FloatingDock 的 GroupDivider 画分隔线（hover 显示组名）。
+ */
 const NAV = [
-  {href: '/', title: '网关与运维', icon: Server, group: '总览'},
-  {href: '/stats', title: '数据指标', icon: BarChart3, group: '总览'},
-  {href: '/logs', title: '日志', icon: ScrollText, group: '运维'},
-  {href: '/settings', title: '设置', icon: SettingsIcon, group: '运维'},
+  {href: '/', title: '仪表盘', icon: LayoutDashboard, group: '总览'},
+  {href: '/accounts', title: '账号', icon: Users, group: '运营'},
+  {href: '/keys', title: '密钥', icon: KeyRound, group: '运营'},
+  {href: '/models', title: '模型', icon: Boxes, group: '运营'},
+  {href: '/stats', title: '统计', icon: BarChart3, group: '治理'},
+  {href: '/logs', title: '日志', icon: ScrollText, group: '治理'},
+  {href: '/settings', title: '设置', icon: SettingsIcon, group: '治理'},
 ];
 
 function ThemeToggle() {
@@ -42,6 +54,7 @@ function ThemeToggle() {
 
 export function AppDock() {
   const pathname = usePathname() || '/';
+  const {open} = useAddAccount();
   const active = (href: string) => (href === '/' ? pathname === '/' : pathname.startsWith(href));
 
   const items: FloatingDockItem[] = NAV.map((item) => ({
@@ -51,7 +64,6 @@ export function AppDock() {
     tooltip: item.title,
     groupKey: item.group,
     groupLabel: item.group,
-    // 用 Link 语义做客户端跳转；customComponent 里包一层 <Link> 保留 dock 动效
     customComponent: (
       <Link
         href={item.href}
@@ -68,18 +80,32 @@ export function AppDock() {
     ),
   }));
 
+  // 动作组：+ 添加账号 / 主题切换（与 workbuddy 的 actions 组同构）
+  items.push({
+    title: '添加账号',
+    icon: <PlusCircle className="size-5" />,
+    tooltip: '添加账号（OAuth / 扫描 / PAT / JSON）',
+    groupKey: '动作',
+    customComponent: (
+      <button
+        type="button"
+        onClick={() => open('oauth')}
+        className="grid size-full place-items-center rounded-full text-neutral-600 transition-colors hover:text-neutral-900 dark:text-neutral-300 dark:hover:text-white"
+      >
+        <PlusCircle className="size-4" />
+      </button>
+    ),
+  });
   items.push({
     title: '主题',
     icon: <ThemeToggle />,
-    groupKey: '偏好',
-    groupLabel: '偏好',
+    groupKey: '动作',
     customComponent: <ThemeToggle />,
   });
 
   return (
     // 外层 fixed 必须「收缩到内容宽度」再居中（left-1/2 + -translate-x-1/2）：
-    // 若写成 inset-x-0，浮岛会被拉成整屏宽的一条，图标全挤在左边
-    // （FloatingDock 桌面容器只有 mx-auto，没有自带宽度的约束）。
+    // 若写成 inset-x-0，浮岛会被拉成整屏宽的一条，图标全挤在左边。
     <div className="fixed bottom-3 left-1/2 z-40 w-fit -translate-x-1/2">
       <FloatingDock
         items={items}

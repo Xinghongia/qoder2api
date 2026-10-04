@@ -12,20 +12,53 @@ import {notify} from '@/lib/toast';
 import {ConfirmDialog, FIELD_CLASS, FieldLabel, SectionCard, errText} from './shared';
 
 /**
- * 面板访问密码。后端：POST /panel/password（{current, new}），
- * 校验通过后吊销其它浏览器会话并为当前会话补发新 token。
+ * 面板访问密码与登录账号。后端：POST /panel/password（{current, new}），
+ * 校验通过后吊销其它浏览器会话并为当前会话补发新 token；
+ * 登录账号单独走 POST /settings/save {panel_username}，改账号不需要密码。
  */
 export function PasswordSection({
   isDefault,
+  username,
   onChanged,
 }: {
   isDefault: boolean;
+  /** 当前登录账号（GET /settings 的 panel_username，默认 admin） */
+  username: string;
   onChanged: () => Promise<void>;
 }) {
   const {refreshStatus} = useAuth();
+  const [account, setAccount] = React.useState(username);
+  const [savingAccount, setSavingAccount] = React.useState(false);
   const [current, setCurrent] = React.useState('');
   const [next, setNext] = React.useState('');
   const [confirmOpen, setConfirmOpen] = React.useState(false);
+
+  // 服务器数据刷新后同步账号初值（密码输入框里的内容不受影响）
+  React.useEffect(() => {
+    setAccount(username);
+  }, [username]);
+
+  const saveAccount = async () => {
+    const value = account.trim();
+    if (!value) {
+      notify.warn('登录账号不能为空');
+      return;
+    }
+    if (value.length > 64) {
+      notify.warn('登录账号最长 64 个字符');
+      return;
+    }
+    setSavingAccount(true);
+    try {
+      await api.settings.save({panel_username: value});
+      notify.ok('登录账号已更新', '下次登录请使用新账号');
+      await onChanged();
+    } catch (e) {
+      notify.err('保存失败', errText(e));
+    } finally {
+      setSavingAccount(false);
+    }
+  };
 
   const requestChange = () => {
     if (!current || !next) {
@@ -80,6 +113,28 @@ export function PasswordSection({
           </span>
         </div>
       )}
+
+      <div className="mb-3">
+        <FieldLabel>登录账号</FieldLabel>
+        <div className="flex gap-2">
+          <Input
+            autoComplete="username"
+            className={`${FIELD_CLASS} flex-1`}
+            placeholder="admin"
+            value={account}
+            onChange={(e) => setAccount(e.target.value)}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            disabled={savingAccount}
+            onClick={() => void saveAccount()}
+          >
+            {savingAccount ? '保存中…' : '保存账号'}
+          </Button>
+        </div>
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div>

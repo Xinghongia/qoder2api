@@ -332,6 +332,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | POST | /accounts/checkin | 手动每日签到（单个/全部；只领 Credits 类，不动券类） |
 | GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
 | GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
+| GET | /usage/daily | 按天汇总（仪表盘 14 天趋势；`days=` 1-90，`realm=` 过滤） |
 | GET | /identity/export | 导出本机机器身份（面板鉴权；给没有官方客户端的服务器固定用） |
 
 ---
@@ -371,6 +372,11 @@ python scripts/_verify_models.py --base http://127.0.0.1:8790
 cd web && npm install
 npm run dev            # 开发服务器 :3000，API 反向代理到 :8790
 npm run build:export   # 产出 web/out（产物已入库；重建后请一并提交）
+
+# 页面结构（App Router）：
+#   /login 独立登录页（账号+密码，默认 admin/admin）
+#   (main)/ 底部管理栏四组：总览=仪表盘；运营=账号/密钥/模型；治理=统计/日志/设置
+#   右上角切换「国际版 / 国内版」，作用于仪表盘、账号、模型、统计
 ```
 
 目录结构：

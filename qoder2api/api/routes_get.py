@@ -24,7 +24,8 @@ from ..update import check_for_update
 from ..models import fetch_models
 from ..model_entry import model_entry
 from ..usage import (compute_usage_analytics, perf_stats,
-                     recent_usage, usage_by_account, usage_snapshot)
+                     recent_usage, usage_by_account, usage_daily,
+                     usage_snapshot)
 from ..logbus import get_logs
 
 
@@ -237,6 +238,17 @@ class GetRoutesMixin(object):
             req_realm = query.get("realm", [None])[0] \
                 or self.headers.get("X-Realm") or runtime.CURRENT_REALM
             return self._json(200, perf_stats(sample, realm=req_realm))
+        if path == "/usage/daily":
+            # 仪表盘 14 天趋势：按天汇总请求 / token / 失败（本地区时切天）。
+            if not self._authorized():
+                return
+            try:
+                days = max(1, min(90, int((query.get("days") or ["14"])[0])))
+            except ValueError:
+                days = 14
+            req_realm = query.get("realm", [None])[0] \
+                or self.headers.get("X-Realm") or runtime.CURRENT_REALM
+            return self._json(200, usage_daily(days, realm=req_realm))
         if path == "/tasks":
             if not self._authorized():
                 return

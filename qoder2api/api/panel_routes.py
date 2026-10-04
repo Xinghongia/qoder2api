@@ -68,6 +68,13 @@ class PanelRoutesMixin(object):
                 })
             qoder_settings.set_api_keys(runtime.ACCOUNTS_DIR, cleaned)
             reply["api_keys_saved"] = len(cleaned)
+        if "panel_username" in payload:
+            # 登录用户名（默认 admin）：与密码一起构成登录凭据。
+            try:
+                reply["panel_username"] = qoder_settings.set_panel_username(
+                    runtime.ACCOUNTS_DIR, payload.get("panel_username"))
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
         if "auth_disabled" in payload:
             qoder_settings.set_auth_disabled(runtime.ACCOUNTS_DIR,
                                              payload.get("auth_disabled"))
@@ -169,7 +176,19 @@ class PanelRoutesMixin(object):
                                        "too many login attempts, please wait %ds"
                                        % max(1, wait_sec),
                                        "rate_limit_error")
+            username = payload.get("username")
             password = str(payload.get("password") or "")
+            # 登录页发 {username, password}：用户名不符直接失败（不透露是哪一项错）。
+            # 旧客户端（旧看板 dashboard.html、脚本）只发 password，视为默认用户名，
+            # 保持兼容——真正的秘密始终是密码。
+            if username is not None:
+                expected = qoder_settings.panel_username(runtime.ACCOUNTS_DIR)
+                if str(username).strip() != expected:
+                    with _login_lock:
+                        _login_attempts.setdefault(client_ip, []).append(now)
+                    time.sleep(0.5)   # 撞库缓解
+                    return self._error(401, "invalid username or password",
+                                       "invalid_request_error")
             if not qoder_settings.verify_panel_password(runtime.ACCOUNTS_DIR, password):
                 with _login_lock:
                     _login_attempts.setdefault(client_ip, []).append(now)

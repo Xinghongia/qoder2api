@@ -61,6 +61,8 @@ def runtime_settings_view():
     return {
         "panel_password_is_default":
             qoder_settings.panel_password_is_default(runtime.ACCOUNTS_DIR),
+        "panel_username":
+            qoder_settings.panel_username(runtime.ACCOUNTS_DIR),
         "api_key_set": bool(key),
         "api_key_set_by_panel": runtime.API_KEY_FILE_SET,
         "api_key_masked": masked,

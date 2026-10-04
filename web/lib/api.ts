@@ -188,7 +188,12 @@ export interface PanelStatus {
 export const api = {
   panel: {
     status: () => http.get<PanelStatus>('/panel/status'),
-    login: (password: string) => http.post<{token: string}>('/panel/login', {password}),
+    // 登录页发 {username, password}；后端对旧客户端（只发 password）保持兼容
+    login: (username: string, password: string) =>
+      http.post<{token: string; using_default_password?: boolean}>('/panel/login', {
+        username,
+        password,
+      }),
     logout: () => http.post('/panel/logout'),
     // 后端 /panel/password 收 {current, new}（见 qoder2api/api/panel_routes.py）
     password: (current: string, next: string) =>
@@ -234,6 +239,9 @@ export const api = {
     perf: (realm?: string) => http.get(`/usage/perf${realm ? `?realm=${realm}` : ''}`),
     byAccount: () => http.get('/usage/by-account'),
     analytics: (scope: 'today' | 'all') => http.get(`/usage/analytics?scope=${scope}`),
+    /** 按天汇总（仪表盘趋势图）：{days: [{date, day, requests, tokens, failed, credit}]} */
+    daily: (days: number = 14, realm?: string) =>
+      http.get(`/usage/daily?days=${days}${realm ? `&realm=${realm}` : ''}`),
   },
   tasks: () => http.get('/tasks'),
   tasksRun: (uid?: string) => http.post('/tasks/run', uid ? {uid} : {}),

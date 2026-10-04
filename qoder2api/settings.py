@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 DEFAULT_PANEL_PASSWORD = "admin"
+DEFAULT_PANEL_USERNAME = "admin"
 PBKDF2_ROUNDS = 120_000
 SESSION_TTL = 7 * 24 * 3600
 
@@ -68,6 +69,27 @@ def panel_password_is_default(accounts_dir):
     if not data.get("panel_password_hash"):
         return True
     return data.get("panel_password_default") is True
+
+
+def panel_username(accounts_dir):
+    """面板登录用户名（默认 admin；与密码一起构成登录凭据）。"""
+    name = str(load(accounts_dir).get("panel_username") or "").strip()
+    return name or DEFAULT_PANEL_USERNAME
+
+
+def set_panel_username(accounts_dir, username):
+    """设置登录用户名；空值恢复默认 admin。"""
+    username = str(username or "").strip()
+    if username and len(username) > 64:
+        raise ValueError("username too long (max 64)")
+    with _lock:
+        data = load(accounts_dir)
+        if not username or username == DEFAULT_PANEL_USERNAME:
+            data.pop("panel_username", None)
+        else:
+            data["panel_username"] = username
+        save(accounts_dir, data)
+        return panel_username(accounts_dir)
 
 
 def verify_panel_password(accounts_dir, password):

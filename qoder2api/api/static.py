@@ -15,6 +15,7 @@
 """
 import os
 import posixpath
+import urllib.parse
 
 from .. import paths
 
@@ -82,11 +83,14 @@ def resolve(path):
     """返回 (文件绝对路径, 是否长缓存) 或 (None, False)。
 
     候选顺序：精确文件 → `<path>/index.html` → `<path>.html`。
+    先做百分号解码：路由组的导出产物带括号（`chunks/app/(main)/…`），
+    部分客户端会把括号编码成 %28/%29；解码后仍要过 `_safe_join` 的
+    越界检查，所以 `%2e%2e` 之类的穿越依旧会被拒。
     """
     root = str(paths.static_dir())
     if not os.path.isdir(root):
         return None, False
-    clean = path.split("?", 1)[0]
+    clean = urllib.parse.unquote(path.split("?", 1)[0])
     if not clean.startswith("/"):
         clean = "/" + clean
     target = _safe_join(root, clean)

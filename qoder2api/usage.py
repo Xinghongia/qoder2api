@@ -317,6 +317,84 @@ def _perf_stats_uncached(sample=5000, realm=None):
     }
 
 
+_daily_cache = {}
+_daily_lock = threading.Lock()
+
+
+def usage_daily(days=14, realm=None, ttl=30):
+    """按天汇总最近 N 天（仪表盘趋势图）。
+
+    从 usage.jsonl 逐行扫描：`at` 落在窗口内、且区域匹配的行按本地日期分桶，
+    统计请求数 / 总 token / 失败数 / credit。缺失的日期补零，保证曲线连续
+    （从最早到今天，升序）。结果按 (days, realm) 做短缓存：仪表盘会轮询。
+    """
+    try:
+        days = max(1, min(90, int(days)))
+    except Exception:
+        days = 14
+    key = (days, realm or "")
+    now = time.time()
+    with _daily_lock:
+        hit = _daily_cache.get(key)
+        if hit is not None and (now - hit[0]) < ttl:
+            return hit[1]
+
+    # 以本地时区切天：今天 00:00 起往前推 days-1 天
+    today = time.localtime(now)
+    midnight = time.mktime((today.tm_year, today.tm_mon, today.tm_mday,
+                            0, 0, 0, 0, 0, -1))
+    start = midnight - (days - 1) * 86400
+    buckets = {}
+    for i in range(days):
+        day = time.strftime("%Y-%m-%d", time.localtime(start + i * 86400))
+        buckets[day] = {"date": day, "day": day[5:], "requests": 0,
+                        "tokens": 0, "failed": 0, "credit": 0.0,
+                        "prompt_tokens": 0, "cached_tokens": 0,
+                        "ttft_sum": 0.0, "ttft_n": 0,
+                        "speed_sum": 0.0, "speed_n": 0}
+    try:
+        with open(runtime.USAGE_LOG, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                at = row.get("at")
+                if not isinstance(at, (int, float)) or at < start:
+                    continue
+                if realm and not row_matches_realm(row, realm):
+                    continue
+                day = time.strftime("%Y-%m-%d", time.localtime(at))
+                bucket = buckets.get(day)
+                if bucket is None:      # 时钟漂移导致的未来行，忽略
+                    continue
+                bucket["requests"] += 1
+                if row.get("error"):
+                    bucket["failed"] += 1
+                else:
+                    bucket["tokens"] += int(row.get("total_tokens") or 0)
+                    bucket["credit"] += float(row.get("credit") or 0)
+                    bucket["prompt_tokens"] += int(row.get("prompt_tokens") or 0)
+                    bucket["cached_tokens"] += int(row.get("cached_tokens") or 0)
+                    if row.get("ttft_ms"):
+                        bucket["ttft_sum"] += row["ttft_ms"]
+                        bucket["ttft_n"] += 1
+                    if row.get("tokens_per_sec"):
+                        bucket["speed_sum"] += row["tokens_per_sec"]
+                        bucket["speed_n"] += 1
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        log("usage_daily read failed: %s" % exc)
+    out = {"days": [buckets[k] for k in sorted(buckets)],
+           "realm": realm, "days_count": days}
+    with _daily_lock:
+        _daily_cache[key] = (now, out)
+    return out
+
+
 _snap_cache = {}
 _snap_lock = threading.Lock()
 

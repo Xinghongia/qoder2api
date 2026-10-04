@@ -44,9 +44,25 @@ check("/accounts/ 不归接口（前端页面优先）", not S.api_takes_path("/
 print()
 print("[2] 目录穿越防护：一律解析不到仓库外的文件")
 for bad in ("/../qoder_proxy.py", "/..%2fqoder_proxy.py", "/%2e%2e/qoder_proxy.py",
-            "/_next/../../qoder_proxy.py", "/....//qoder_proxy.py"):
+            "/_next/../../qoder_proxy.py", "/....//qoder_proxy.py",
+            "/%2e%2e%2fqoder_proxy.py"):
     path, _cache = S.resolve(bad)
     check("拒绝 %s" % bad, path is None, path)
+
+print()
+print("[2b] 百分号解码后仍能服务路由组产物（括号路径）")
+import glob as _glob  # noqa: E402
+_root_out = os.path.join(_ROOT, "web", "out")
+_hits = _glob.glob(os.path.join(_root_out, "_next", "static", "chunks", "app",
+                                "(main)", "page-*.js"))
+if _hits:
+    _rel = _hits[0][len(_root_out):].replace(os.sep, "/")
+    p1, _c1 = S.resolve(_rel)
+    p2, _c2 = S.resolve(_rel.replace("(", "%28").replace(")", "%29"))
+    check("原文括号路径可解析", p1 is not None, _rel)
+    check("%28/%29 编码路径同样可解析", p2 is not None, _rel)
+else:
+    check("找到路由组导出的 chunk（跳过编码检查）", False, "no (main) chunk")
 
 print()
 print("[3] _safe_join 的核心不变量：返回值永远落在 root 内（或 None）")
@@ -84,7 +100,8 @@ check("接口请求带 application/json 时不误判",
       not S.is_browser_navigation({"Accept": "text/html, application/json"}))
 check("/logs 存在导出页面（导航时该重定向）", S.page_exists("/logs"))
 check("/stats 存在导出页面", S.page_exists("/stats"))
-check("/accounts 没有页面（仍归接口）", not S.page_exists("/accounts"))
+check("/accounts 现在也有页面（账号页与接口同名）", S.page_exists("/accounts"))
+check("/usage 没有页面（纯接口）", not S.page_exists("/usage"))
 check("/v1/models 没有页面（仍归接口）", not S.page_exists("/v1/models"))
 
 print()
