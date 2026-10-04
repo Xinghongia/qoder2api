@@ -59,7 +59,8 @@ export function RealmProvider({children}: {children: React.ReactNode}) {
     setModeState(next);
     const p = pref || (next === 'both' ? 'cn' : (next as Realm));
     setPreferred(p);
-    setView(p);
+    // 刻意**不动 view**：改网关出口是全局设置，不应把用户正在看的
+    // 国际版/国内版列表顶走（旧看板正是因为这个行为被投诉过）。
   }, []);
 
   const value = React.useMemo<RealmState>(

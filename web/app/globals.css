@@ -123,8 +123,48 @@
     @apply border-border outline-ring/50;
   }
 
+  /*
+   * 滚动条出现/消失时不要顶动页面：始终预留滚动条槽位。
+   * 否则短页面与长页面互相切换时，整页内容会横向跳一下。
+   */
+  html {
+    scrollbar-gutter: stable;
+  }
+
   body {
     @apply bg-background text-foreground;
+  }
+
+  /*
+   * 全局细滚动条（与 .scroll-slim 同一套配方，作用于所有滚动容器）：
+   * Firefox 走 scrollbar-width/color；Chromium 走 ::-webkit-scrollbar，
+   * 用透明边框把可见滑块收窄到约 4px，可抓取区域仍是 10px。
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 30%, transparent)
+      transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklab, var(--muted-foreground) 30%, transparent);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--muted-foreground) 55%, transparent);
   }
 }
 

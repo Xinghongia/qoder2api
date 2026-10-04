@@ -50,8 +50,31 @@ export default function AccountsPage() {
   const onCheckin = async (uid?: string) => {
     setBusy(uid || 'all');
     try {
-      const r = await api.accounts.checkin(uid);
-      notify.ok(uid ? '已提交签到' : '已提交全部签到', describeCheckin(r));
+      const r = (await api.accounts.checkin(uid)) as {results?: CheckinResult[]};
+      const results = r?.results || [];
+      // 反馈口径照旧看板：逐个账号报「成功 / 失败原因」，不能只回一句
+      // 「已提交」——失败（同人去重、上游拒绝、无接口）必须如实说出来。
+      if (!results.length) {
+        notify.warn(uid ? '未找到该账号' : '未发现可签到账号', '账号可能已停用或凭证缺失');
+      } else if (uid || results.length === 1) {
+        const x = results[0];
+        const line = checkinLine(x);
+        if (x.ok) notify.ok('签到完成', line);
+        else notify.err('签到失败', line);
+      } else {
+        const lines = results.map(checkinLine).join('；');
+        const okCount = results.filter((x) => x.ok).length;
+        if (okCount === results.length) {
+          notify.ok(`每日签到：${okCount}/${results.length} 全部成功`, lines);
+        } else if (okCount > 0) {
+          notify.warn(
+            `每日签到：${okCount}/${results.length} 成功，${results.length - okCount} 个失败`,
+            lines,
+          );
+        } else {
+          notify.err('每日签到：全部失败', lines);
+        }
+      }
       await load();
     } catch (e) {
       notify.err('签到失败', e instanceof Error ? e.message : String(e));
@@ -99,9 +122,27 @@ export default function AccountsPage() {
   );
 }
 
-function describeCheckin(r: unknown): string | undefined {
-  const data = r as {results?: Array<{uid?: string; ok?: boolean; reward_text?: string}>};
-  if (!data?.results?.length) return undefined;
-  const okCount = data.results.filter((x) => x.ok).length;
-  return `${okCount}/${data.results.length} 个账号成功`;
+/** 后端 /accounts/checkin 的单账号结果（qoder2api/api/accounts_routes.py）。 */
+interface CheckinResult {
+  uid?: string;
+  nickname?: string;
+  ok?: boolean;
+  earned_credit?: number;
+  /** logs 的最后一行（往往是「当前额度余额」这类收尾行） */
+  msg?: string;
+  logs?: string[];
+}
+
+/**
+ * 一个账号的签到结果文案，与旧看板 checkinOne/doCheckin 同一口径：
+ * 成功显示实际动作（领取/已领取），失败显示真实原因。
+ * logs 里带 ✓/⚠/! 标记的那一行信息量最大，优先用它（去掉标记与 [账号名]）。
+ */
+function checkinLine(x: CheckinResult): string {
+  const name = x.nickname || (x.uid || '').slice(0, 6) || '账号';
+  const marked = (x.logs || []).find((l) => /[✓⚠!]/.test(l));
+  let detail = (marked || x.msg || '').replace(/^[✓⚠!\-\s]*\[[^\]]*\]\s*/, '').trim();
+  if (!detail) detail = x.ok ? '签到成功' : '签到失败';
+  if (x.ok && x.earned_credit) detail = `+${x.earned_credit} Credits · ${detail}`;
+  return `${name}：${detail}`;
 }

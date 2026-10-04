@@ -70,8 +70,10 @@ export function AppDock() {
         aria-current={active(item.href) ? 'page' : undefined}
         className={cn(
           'grid size-full place-items-center rounded-full transition-colors',
+          // 选中态：亮底 + 常规前景色（原先的 bg-primary 是一整块深色圆，
+          // 在浅色主题下像一块黑补丁；改成浅色胶囊后图标更"透气"）。
           active(item.href)
-            ? 'bg-primary text-primary-foreground'
+            ? 'bg-white text-foreground shadow-sm ring-1 ring-black/5 dark:bg-white/[0.14] dark:text-white dark:ring-white/10'
             : 'text-neutral-600 hover:text-neutral-900 dark:text-neutral-300 dark:hover:text-white',
         )}
       >

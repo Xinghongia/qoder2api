@@ -34,11 +34,48 @@ export function useAddAccount(): AddAccountContextValue {
 
 export function AddAccountProvider({children}: {children: React.ReactNode}) {
   const [which, setWhich] = React.useState<AddAccountKind | null>(null);
+  /**
+   * 关闭的弹窗**不进 React 树**：它们会消费 useRealm，切换国际/国内时会被
+   * 上下文变更重渲染——常驻挂载时偶发「闪一下」。关闭后延迟 220ms 再卸载，
+   * 让 150ms 的退出动画播完；重开时取消卸载。
+   */
+  const [visible, setVisible] = React.useState<AddAccountKind | null>(null);
+  const unmountTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [refreshKey, setRefreshKey] = React.useState(0);
 
   const bump = React.useCallback(() => setRefreshKey((n) => n + 1), []);
-  const open = React.useCallback((kind: AddAccountKind) => setWhich(kind), []);
-  const close = React.useCallback(() => setWhich(null), []);
+
+  const open = React.useCallback((kind: AddAccountKind) => {
+    if (unmountTimer.current) {
+      clearTimeout(unmountTimer.current);
+      unmountTimer.current = null;
+    }
+    setVisible(kind);
+    setWhich(kind);
+  }, []);
+
+  const close = React.useCallback(() => {
+    setWhich(null);
+    if (unmountTimer.current) clearTimeout(unmountTimer.current);
+    unmountTimer.current = setTimeout(() => {
+      setVisible(null);
+      unmountTimer.current = null;
+    }, 220);
+  }, []);
+
+  React.useEffect(
+    () => () => {
+      if (unmountTimer.current) clearTimeout(unmountTimer.current);
+    },
+    [],
+  );
+
+  const handleOpenChange = React.useCallback(
+    (o: boolean) => {
+      if (!o) close();
+    },
+    [close],
+  );
 
   const value = React.useMemo(
     () => ({open, refreshKey, bump}),
@@ -48,26 +85,34 @@ export function AddAccountProvider({children}: {children: React.ReactNode}) {
   return (
     <AddAccountContext.Provider value={value}>
       {children}
-      <OAuthDeviceDialog
-        open={which === 'oauth'}
-        onOpenChange={(o) => !o && close()}
-        onChanged={bump}
-      />
-      <DesktopScanDialog
-        open={which === 'desktop'}
-        onOpenChange={(o) => !o && close()}
-        onChanged={bump}
-      />
-      <PatImportDialog
-        open={which === 'pat'}
-        onOpenChange={(o) => !o && close()}
-        onChanged={bump}
-      />
-      <ImportAccountsDialog
-        open={which === 'json'}
-        onOpenChange={(o) => !o && close()}
-        onChanged={bump}
-      />
+      {visible === 'oauth' && (
+        <OAuthDeviceDialog
+          open={which === 'oauth'}
+          onOpenChange={handleOpenChange}
+          onChanged={bump}
+        />
+      )}
+      {visible === 'desktop' && (
+        <DesktopScanDialog
+          open={which === 'desktop'}
+          onOpenChange={handleOpenChange}
+          onChanged={bump}
+        />
+      )}
+      {visible === 'pat' && (
+        <PatImportDialog
+          open={which === 'pat'}
+          onOpenChange={handleOpenChange}
+          onChanged={bump}
+        />
+      )}
+      {visible === 'json' && (
+        <ImportAccountsDialog
+          open={which === 'json'}
+          onOpenChange={handleOpenChange}
+          onChanged={bump}
+        />
+      )}
     </AddAccountContext.Provider>
   );
 }
