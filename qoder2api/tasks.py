@@ -19,6 +19,10 @@ from .accounts import get_realm_config
 
 _log = lambda msg: None
 
+# 签到防风控：账号之间的最小间隔（秒）。模块文档声明的 ">= 1.0s" 由本常量
+# 落地——单账号路径（api/accounts_routes.py）也按它取值并保证账号间隔。
+CHECKIN_MIN_GAP = 1.0
+
 # ---------------------------------------------------------------------------
 # 面板读路径短缓存
 # ---------------------------------------------------------------------------
@@ -362,9 +366,11 @@ def _campaign_task_row(account, camp, summary):
             "活动定向内、虚拟机环境、试用资格已用尽/冻结；详见 README「活动与新人权益规则」）")
     if camp.get("show_campaign"):
         desc = "活动进行中，当前账号暂无可领取项"
-    if camp.get("identity") == "derived":
-        # 派生假身份会被服务端静默过滤设备定向活动——给出可操作的出路
-        desc += "；当前为派生假身份，设备定向活动可能被过滤（可在「设置 → 机器身份」固定真身份）"
+    if camp.get("hint"):
+        # 无原生机器身份时后端不再发派生假头（issue #10）：INTL 侧活动列表
+        # 可能因此不可见——这是**已知限制**，不要误报成"今天没有活动"。
+        # 文案由后端 hint 统一给出（含"不等于今天没有活动"的澄清），这里只补出路。
+        desc += "；" + camp["hint"] + "（可在「设置 → 机器身份」固定真身份）"
     return {
         "task_code": "daily_checkin",
         "name": "每日签到（每日领取 Credits）",
@@ -694,7 +700,7 @@ def fetch_tasks_view(pool, realm=None, uid=None):
 # ---------------------------------------------------------------------------
 # 单账号：签到执行
 # ---------------------------------------------------------------------------
-def run_checkin(account, gap=1.0, only_daily=False):
+def run_checkin(account, gap=1.0, only_daily=False, claim_gap=None):
     """为一个账号执行签到闭环。返回 {ok, logs, earned_credit, credits}。
 
     顺序（与官方现状一致）：
@@ -705,14 +711,24 @@ def run_checkin(account, gap=1.0, only_daily=False):
 
     only_daily=True：只做"每日签到领积分"（Credits 类活动），不触碰兑换码/券类
     福利与 Pro 包——账号面板的「每日签到」按钮走这条。
+
+    间隔语义（分工，切勿重复 clamp）：
+      gap             调用方决定的请求节奏（秒），默认 1.0；None = 交给 accounts 层
+                      的安全默认（CLAIM_GAP_DEFAULT）。
+      claim_gap       活动平台**内部相邻两次 claim** 的间隔（秒）；None（默认）=
+                      跟随 gap。0 是合法值（不等待），因此这里只做 is None 判断，
+                      既不用 falsy 判断，也不在本层 max(1.0, ...) 之类地 clamp。
     """
+    settle = 1.0 if gap is None else max(0.0, float(gap))
+    # 透传给活动平台内部：只有调用方显式给了 claim_gap 才覆盖 gap（gap=0 不丢）
+    camp_gap = settle if claim_gap is None else max(0.0, float(claim_gap))
     only_kinds = ("", "CREDITS") if only_daily else None
     logs = []
     name = account.nickname or account.uid[:8]
     logs.append(f"开始为账号 [{name}] 执行每日签到...")
 
     # --- 1) 活动平台（官方现行机制） ---
-    camp = account.campaign_checkin(only_kinds=only_kinds)
+    camp = account.campaign_checkin(gap=camp_gap, only_kinds=only_kinds)
     earned = 0
     if camp.get("claimed"):
         keys = ", ".join(qoder_accounts.campaign_label(c) for c in camp["claimed"])
@@ -750,7 +766,7 @@ def run_checkin(account, gap=1.0, only_daily=False):
             logs.append("  [%s] %s：需先在官方桌面端完成新人任务（成就 %s）"
                         % (name, qoder_accounts.campaign_label(item),
                            item.get("required_achievement_key") or "?"))
-        time.sleep(gap)
+        time.sleep(settle)
         if account.fetch_credits().get("ok"):
             logs.append(f"  当前额度余额: {account.credits.get('remain', 0)}")
         account.fetch_plan()
@@ -778,7 +794,7 @@ def run_checkin(account, gap=1.0, only_daily=False):
                 "error": res2.get("error")}
 
     # 签到后刷新额度与套餐快照（发放有秒级延迟，失败不影响签到结果）
-    time.sleep(gap)
+    time.sleep(settle)
     if account.fetch_credits().get("ok"):
         remain = account.credits.get("remain", 0)
         logs.append(f"  当前额度余额: {remain}")
@@ -787,28 +803,57 @@ def run_checkin(account, gap=1.0, only_daily=False):
             "credits": account.credits}
 
 
+# Pro 升级包一次性奖励面额：上游 eligibility/claim 目前不回传金额，故此处兜底；
+# 若将来 qoder_accounts 在响应里给出 amount，则优先采用真实值（不硬编码）。
+PRO_REWARD_CREDIT = 1800
+
+
 def run_pro_claim(account):
-    """领取一次性 Pro 升级包（+1800）。"""
+    """领取一次性 Pro 升级包（+1800）。返回 {ok, logs, earned_credit,
+    already_claimed, state, msg, credits}。
+
+    幂等语义：上游把"已领取"归一成**成功**（accounts.Account.pro_claim
+    对 HTTP 409 / ALREADY 返回 ok=True + already=True），所以必须区分两件事——
+      · state="claimed_now"     本轮真实新增 → 才计入 earned_credit；
+      · state="already_claimed" 本就已领取   → earned_credit 记 0，只如实回报事实。
+    否则批量汇总的 credit_added 每次都会虚增 +1800（历史缺陷）。
+    """
     logs = []
     name = account.nickname or account.uid[:8]
     ok, elig = account.pro_eligibility()
     if not ok:
         logs.append(f"! [{name}] Pro 升级包资格查询失败: {elig}")
-        return {"ok": False, "logs": logs, "earned_credit": 0}
+        return {"ok": False, "logs": logs, "earned_credit": 0,
+                "already_claimed": False, "state": "error",
+                "msg": "资格查询失败: %s" % elig}
     if not elig:
+        # 资格为假 = 已领过或活动未开放（端点 404/403/410 亦归此）
         logs.append(f"— [{name}] Pro 升级包不可领取（已领或活动未开放）")
-        return {"ok": True, "logs": logs, "earned_credit": 0}
+        return {"ok": True, "logs": logs, "earned_credit": 0,
+                "already_claimed": False, "state": "not_available",
+                "msg": "不可领取（已领或活动未开放）"}
     res = account.pro_claim()
-    earned = 0
-    if res.get("ok"):
-        logs.append(f"✓ [{name}] {res.get('msg')}")
-        time.sleep(1.0)
-        if account.fetch_credits().get("ok"):
-            logs.append(f"  当前额度余额: {account.credits.get('remain', 0)}")
-        earned = 1800
-    else:
+    if not res.get("ok"):
         logs.append(f"! [{name}] Pro 升级包领取失败: {res.get('error')}")
-    return {"ok": bool(res.get("ok")), "logs": logs, "earned_credit": earned,
+        return {"ok": False, "logs": logs, "earned_credit": 0,
+                "already_claimed": False, "state": "error",
+                "msg": "领取失败: %s" % (res.get("error") or "?"),
+                "credits": account.credits}
+    if res.get("already"):
+        # 上游 409/ALREADY：本轮没有发放，不等待秒级延迟、不计数
+        logs.append(f"✓ [{name}] {res.get('msg')}（不重复发放，本次不计新增）")
+        return {"ok": True, "logs": logs, "earned_credit": 0,
+                "already_claimed": True, "state": "already_claimed",
+                "msg": "已领取（不重复发放，本次不计新增）",
+                "credits": account.credits}
+    logs.append(f"✓ [{name}] {res.get('msg')}")
+    time.sleep(1.0)          # 发放有秒级延迟，先等一下再取余额快照
+    if account.fetch_credits().get("ok"):
+        logs.append(f"  当前额度余额: {account.credits.get('remain', 0)}")
+    earned = int(res.get("amount") or 0) or PRO_REWARD_CREDIT
+    return {"ok": True, "logs": logs, "earned_credit": earned,
+            "already_claimed": False, "state": "claimed_now",
+            "msg": "领取成功 +%d 积分" % earned,
             "credits": account.credits}
 
 
@@ -838,24 +883,37 @@ def run_batch_checkin(targets, gap=1.0, inter_gap=1.5):
 
 
 def run_batch_pro_claim(targets, gap=1.0, inter_gap=1.5):
-    """批量领取福利包。返回 {ok, logs, credit_added, accounts_count, results}。"""
+    """批量领取福利包。返回 {ok, logs, credit_added, accounts_count,
+    already_count, results, msg}。
+
+    credit_added **只累计本轮真实新增**：已领取（already）与不可领取都记 0，
+    看板「+N 积分」不会再被"本来就已领过"的账号虚增（历史缺陷）。
+    """
     combined, total, results = [], 0, []
+    already_count = 0
     for i, acc in enumerate(targets):
         nick = acc.nickname or acc.uid[:8]
         res = run_pro_claim(acc)
         total += res.get("earned_credit") or 0
-        msg = (res.get("logs") or [""])[-1]
+        if res.get("already_claimed"):
+            already_count += 1
+        msg = res.get("msg") or (res.get("logs") or [""])[-1]
         results.append({"uid": acc.uid, "nickname": nick,
                         "action": "pro_claim", "msg": msg,
+                        "state": res.get("state") or "",
+                        "already_claimed": bool(res.get("already_claimed")),
                         "reward_credit": res.get("earned_credit") or 0})
         for line in res.get("logs") or []:
             combined.append(line)
         if i < len(targets) - 1:
             time.sleep(inter_gap)
+    if already_count:
+        combined.append("====== %d 个账号的 Pro 升级包此前已领取，本次不计新增 ======"
+                        % already_count)
     summary_msg = "\n".join(f"{r['nickname']}: {r['msg']}" for r in results)
     return {"ok": True, "logs": combined, "credit_added": total,
-            "accounts_count": len(targets), "results": results,
-            "msg": summary_msg}
+            "accounts_count": len(targets), "already_count": already_count,
+            "results": results, "msg": summary_msg}
 
 
 # ---------------------------------------------------------------------------

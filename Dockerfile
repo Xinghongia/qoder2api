@@ -35,5 +35,7 @@ VOLUME ["/app/accounts", "/app/usage"]
 
 EXPOSE 8790
 
-# Launch proxy in host 0.0.0.0 mode
-CMD ["python", "qoder_proxy.py", "--host", "0.0.0.0", "--port", "8790"]
+# Launch the proxy: listen params come from the ENV HOST/PORT above (argparse
+# defaults read env vars), so `docker run -e PORT=9000` and compose's
+# `environment:` actually take effect; override this CMD to add other flags.
+CMD ["python", "qoder_proxy.py"]

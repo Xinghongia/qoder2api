@@ -6,33 +6,109 @@
 3. Token 保活 (Keepalive)：每日 22:00 集中刷新；另对剩余寿命不足 4 小时的
    账号在任意巡检中提前刷新（drt- / jrt- 按 token 前缀路由，PAT 兜底）。
 4. 状态持久化与看板展示：暴露状态、执行记录、支持手动立即触发与开关切换。
+
+状态落盘（上游 v1.2.1）：enabled / last_run_time / next_run_time / logs 以及
+「启动补签当日已做过」标记写入 <账号目录>/scheduler/state.json。
+  · 放在账号目录的**子目录**里：AccountPool.load() 只扫顶层 *.json，
+    子目录不会被误当成账号；
+  · 目的：进程重启不再产生重复领取——启动巡检每天最多补签一次
+    （mark-before-act：先打标记落盘再动作，崩溃重启也不会重放）。
 """
+import json
+import os
+import sys
 import threading
 import time
 
 from . import tasks as qoder_tasks
 from .tasks import set_logger, run_batch_checkin, run_keepalive
+from .logbus import add_log_entry
+
+# 状态文件相对账号目录的子路径（避免被 AccountPool 读取为账号 JSON）
+STATE_SUBDIR = "scheduler"
+STATE_FILE_NAME = "state.json"
+
+# 巡回来由：启动自动 / 整点排程 / 手动触发
+CYCLE_STARTUP = "startup"
+CYCLE_HOUR = "hour"
+CYCLE_MANUAL = "manual"
 
 
 class Scheduler(object):
-    def __init__(self, pool):
+    def __init__(self, pool, state_dir=None):
         self.pool = pool
         # 对齐社区默认排程 (本地时区 24 小时制)
         self.checkin_hours = [9, 21]     # 每日 09:00、21:00 签到
         self.keepalive_hours = [22]      # 每日 22:00 集中 Token 保活
         self.all_hours = sorted(set(self.checkin_hours + self.keepalive_hours))
-        self.enabled = True
         self._stop_event = threading.Event()
         self._thread = None
-        self.last_run_time = None
-        self.next_run_time = None
-        self.logs = []
         # 防止重叠执行：trigger_now() 每次点击都会开线程，手动触发可能
         # 落在整点巡检之上。
         self._run_lock = threading.Lock()
+        # 状态目录：优先显式传入（测试）→ 账号池目录 → 环境变量 → 仓库 accounts/
+        self.state_dir = (state_dir or getattr(pool, "dir", None)
+                          or os.environ.get("ACCOUNTS_DIR")
+                          or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "accounts"))
+        self._state_lock = threading.Lock()
+        st = self._load_state()
+        self.enabled = bool(st.get("enabled", True))   # 看板开关重启后仍生效
+        self.last_run_time = st.get("last_run_time") or None
+        self.next_run_time = None
+        self.logs = [str(x) for x in (st.get("logs") or [])][-60:]
+        # 「启动补签」当日标记：进程重启 N 次，同一天最多补签 1 次
+        self.startup_claim_date = str(st.get("startup_claim_date") or "")
+        self.last_cycle_date = str(st.get("last_cycle_date") or "")
         self._calc_next_fire()
         # 把任务层失败（死端点、上游结构变化）也打进看板日志。
         set_logger(self.log)
+        if st:
+            self.log("调度器状态已从 %s 恢复（enabled=%s，上次运行 %s）"
+                     % (self._state_path(), self.enabled,
+                        self.last_run_time or "-"))
+
+    # -- 状态持久化 ---------------------------------------------------------
+    def _state_path(self):
+        return os.path.join(self.state_dir, STATE_SUBDIR, STATE_FILE_NAME)
+
+    def _load_state(self):
+        """读状态文件；不存在/损坏都返回 {}（按全新进程处理）。"""
+        try:
+            with open(self._state_path(), encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_state(self):
+        """原子落盘（tmp + os.replace，同账号文件的写法）。失败只写 stderr。
+
+        注意：本函数**不得**调用 self.log()，否则与 log→_save_state 形成递归。
+        """
+        with self._state_lock:
+            try:
+                path = self._state_path()
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = path + ".tmp"
+                data = {
+                    "enabled": bool(self.enabled),
+                    "last_run_time": self.last_run_time,
+                    "next_run_time": self.next_run_time,
+                    "startup_claim_date": self.startup_claim_date,
+                    "last_cycle_date": self.last_cycle_date,
+                    "logs": self.logs[-60:],
+                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            except Exception as exc:
+                try:
+                    sys.stderr.write("[scheduler] 状态落盘失败: %s\n" % exc)
+                    sys.stderr.flush()
+                except Exception:
+                    pass
 
     def log(self, msg):
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -40,9 +116,10 @@ class Scheduler(object):
         self.logs.append(entry)
         if len(self.logs) > 60:
             self.logs = self.logs[-60:]
+        # 日志即状态：顺带落盘，看板开关/上次运行时间在重启后仍然可见
+        self._save_state()
         try:
-            import qoder_proxy
-            qoder_proxy.add_log_entry("[调度器] %s" % msg, tag="scheduler")
+            add_log_entry("[调度器] %s" % msg, tag="scheduler")
         except Exception:
             pass
 
@@ -62,7 +139,7 @@ class Scheduler(object):
         # 启动后先休眠 10 秒等待主服务就绪，然后执行初次检查
         time.sleep(10)
         try:
-            self._execute_cycle("启动初次初始化巡检")
+            self._execute_cycle("启动初次初始化巡检", CYCLE_STARTUP)
         except Exception as exc:
             self.log("初次巡检异常: %s" % exc)
 
@@ -75,7 +152,7 @@ class Scheduler(object):
                 if cur_min == 0 and cur_hour in self.all_hours:
                     reason = "整点排程命中 (%d:00)" % cur_hour
                     try:
-                        self._execute_cycle(reason)
+                        self._execute_cycle(reason, CYCLE_HOUR)
                     except Exception as exc:
                         self.log("排程执行异常: %s" % exc)
                     time.sleep(65)   # 避开当前这一分钟重复触发
@@ -101,32 +178,53 @@ class Scheduler(object):
         self.next_run_time = time.strftime("%Y-%m-%d %H:%M:%S", t_struct)
 
     def trigger_now(self):
-        """手动立即触发一次调度检查。"""
+        """手动立即触发一次调度检查（不受"启动补签当日一次"闸门限制）。"""
         if self._run_lock.locked():
             return {"ok": False, "msg": "已有巡检正在执行，请稍候再试"}
-        threading.Thread(target=self._execute_cycle, args=("手动立即触发",),
+        threading.Thread(target=self._execute_cycle,
+                         args=("手动立即触发", CYCLE_MANUAL),
                          daemon=True).start()
         return {"ok": True, "msg": "已触发后台调度执行"}
 
-    def _execute_cycle(self, trigger_reason="周期巡检"):
+    def _execute_cycle(self, trigger_reason="周期巡检", cycle_kind=CYCLE_HOUR):
         if not self._run_lock.acquire(blocking=False):
             self.log("跳过本次巡检 (%s)：上一轮仍在执行" % trigger_reason)
             return
         try:
-            self._run_cycle(trigger_reason)
+            self._run_cycle(trigger_reason, cycle_kind)
         finally:
             self._run_lock.release()
 
-    def _run_cycle(self, trigger_reason="周期巡检"):
+    def _allow_complement_checkin(self, cycle_kind):
+        """启动巡检的补签闸门：**同一天最多补签一次**（其余巡回来由不受限）。
+
+        为什么需要：启动巡检会对 can_checkin() 为真的账号发真实领取请求，
+        进程反复重启就会反复领取。这里做 mark-before-act——先把当日标记落盘，
+        再去做领取；即使随后进程崩溃/被杀，重启后也不再重放。
+        can_checkin() 依赖的 per-account lastCheckin（落盘在账号 JSON）是第二道闸。
+        """
+        if cycle_kind != CYCLE_STARTUP:
+            return True
+        today = time.strftime("%Y-%m-%d")
+        if self.startup_claim_date == today:
+            return False
+        self.startup_claim_date = today
+        self._save_state()
+        return True
+
+    def _run_cycle(self, trigger_reason="周期巡检", cycle_kind=CYCLE_HOUR):
         self.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.last_cycle_date = time.strftime("%Y-%m-%d")
         self.log("开始执行任务 (%s)..." % trigger_reason)
         if not self.pool or not self.pool.accounts:
             self.log("暂无可用的活跃账号，跳过本次巡检")
+            self._save_state()
             return
 
         cur_hour = time.localtime().tm_hour
         keepalive_due = cur_hour in self.keepalive_hours
         checkin_due = cur_hour in self.checkin_hours
+        allow_complement = self._allow_complement_checkin(cycle_kind)
 
         # 1. Token 保活：整点 22:00 全量刷新；其余巡检只刷新临近过期的
         force = keepalive_due
@@ -142,7 +240,12 @@ class Scheduler(object):
         #    （能力运行时探测：接口不存在的区域由 run_checkin 给出原因并跳过）
         targets = [a for a in self.pool.accounts
                    if a.enabled and a.access_token]
-        pending = targets if checkin_due else [a for a in targets if a.can_checkin()]
+        if checkin_due:
+            pending = targets          # 09:00 / 21:00 窗口不受启动闸门影响
+        elif allow_complement:
+            pending = [a for a in targets if a.can_checkin()]
+        else:
+            pending = []               # 当日已补签：不发起任何领取
         checkin_count = 0
         earned = 0
         if pending:
@@ -166,6 +269,7 @@ class Scheduler(object):
 
         self.log("巡检完成：Token 保活 %d 个，签到 %d 个，本次新增积分 +%d"
                  % (ka["refreshed"], checkin_count, earned))
+        self._save_state()
 
     def status(self):
         return {
@@ -175,5 +279,8 @@ class Scheduler(object):
             "mode_intl": "整点排程 (09:00/21:00 每日签到 · 22:00 Token 保活)",
             "last_run_time": self.last_run_time or "尚未运行",
             "next_run_time": self.next_run_time or "待调度",
+            "startup_claim_date": self.startup_claim_date or "",
+            "last_cycle_date": self.last_cycle_date or "",
+            "state_file": self._state_path(),
             "logs": self.logs[-20:],
         }

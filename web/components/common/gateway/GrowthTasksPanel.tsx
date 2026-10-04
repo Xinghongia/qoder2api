@@ -125,6 +125,9 @@ interface TravelResult {
   action?: string;
   msg?: string;
   reward_credit?: number;
+  /** claimed_now / already_claimed / not_available / error（后端 run_pro_claim） */
+  state?: string;
+  already_claimed?: boolean;
 }
 
 interface TravelResp {
@@ -133,6 +136,7 @@ interface TravelResp {
   msg?: string;
   logs?: string[];
   accounts_count?: number;
+  already_count?: number;
 }
 
 /* -------------------------------------------------------------- 小工具 */
@@ -293,14 +297,24 @@ function reportTravel(t: TravelResp) {
     else notify.warn('Pro 福利包：没有可处理的账号', '账号都已领取或活动未开放');
     return;
   }
-  const failed = results.filter((r) => (r.msg || '').trimStart().startsWith('!'));
+  // 成败一律看后端显式 state（msg 文案会变，不要把文案当协议）；
+  // 无 state 的老响应回退到原来的 "!" 前缀启发式。
+  const failed = results.filter((r) =>
+    r.state ? r.state === 'error' : (r.msg || '').trimStart().startsWith('!'),
+  );
   const earned = results.filter((r) => (r.reward_credit || 0) > 0);
-  const neutral = results.length - failed.length - earned.length;
+  const already = results.filter((r) => r.state === 'already_claimed');
+  const neutral = results.length - failed.length - earned.length - already.length;
   const sum = earned.reduce((n, r) => n + (r.reward_credit || 0), 0);
   const head = `Pro 福利包：新增 ${earned.length} 个账号${sum ? `（+${sum} 积分）` : ''}`;
+  // 已领取是「本次无新增」而不是失败，也不是"不可领"，单独说清楚
+  const tailParts: string[] = [];
+  if (already.length) tailParts.push(`已领过 ${already.length} 个（不计新增）`);
+  if (neutral) tailParts.push(`不可领 ${neutral} 个`);
+  const tail = tailParts.length ? tailParts.join(' · ') : undefined;
 
   if (!failed.length) {
-    notify.ok(head, neutral ? `已领 / 不可领 ${neutral} 个` : undefined);
+    notify.ok(head, tail);
   } else if (failed.length >= results.length) {
     notify.err(
       `Pro 福利包：${results.length} 个账号全部失败`,
@@ -311,7 +325,7 @@ function reportTravel(t: TravelResp) {
       head,
       `失败 ${failed.length} 个：${failed
         .map((r) => r.nickname || uid8(r.uid || ''))
-        .join('、')}${neutral ? ` · 已领 / 不可领 ${neutral} 个` : ''}`,
+        .join('、')}${tail ? ` · ${tail}` : ''}`,
     );
   }
 }

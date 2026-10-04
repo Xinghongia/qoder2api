@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.5-2496ED?style=flat-square" alt="Version 1.2.5">
+  <img src="https://img.shields.io/badge/Release-v1.2.6-2496ED?style=flat-square" alt="Version 1.2.6">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -18,7 +18,7 @@
 - **COSY 签名推理链路**：RSA 包裹 AES 会话密钥 + MD5 请求签名 + 自定义 Base64 请求体编码，纯标准库实现（含 AES-128/256、RSA-PKCS1v15、GCM、DPAPI、QMC 纯 Python 实现，Docker alpine 下同样零依赖），逆向对齐官方桌面/CLI 客户端协议。
 - **稳定物理设备指纹隔离 (`derive_id`)**：以账号自身 UID 稳定哈希派生专属 `cosy-machineid` / `cosy-machinetoken` / 会话标识，同一账号长期固定在同一台虚拟物理设备，天然防多号关联风控。
 - **OAuth 设备授权一键免客户端登录**：PKCE (S256) 设备流（双区 URL 参数按官方差异构造：国内带 `redirect_uri+client_id+machine_id`，国际带 `client_id+machine_id`），点击看板链接在浏览器完成授权即可自动入池；亦支持 PAT (`pt-`) 导入，jobToken 自动交换与轮换。
-- **每日签到与额度体系（双区域 · 真实领取）**：「每日领取 100 Credits」等活动**由网关直接领取**——用桌面端请求头（`Cosy-ClientType: 10` + 机器头，缺了服务端会返回空列表）列出活动 → 对 `CLAIMABLE` 的 Credits 活动 `POST /sash/api/v1/me/campaigns/{id}/claim`（官方幂等：已领返回 `replayed`，不会重复发放）；旧 sash 签到接口仅在仍开放时兜底（能力运行时探测，404 记「本区域无此接口」6 小时后自动重探）；Pro 升级包资格检查与领取、quota/usage 额度与套餐快照实时刷新。
+- **每日签到与额度体系（双区域 · 真实领取）**：「每日领取 100 Credits」等活动**由网关直接领取**——用桌面端请求头（`Cosy-ClientType: 10` + 有真身份时才带的机器头，缺了服务端会返回空列表）列出活动 → 对 `CLAIMABLE` 的 Credits 活动 `POST /sash/api/v1/me/campaigns/{id}/claim`（官方幂等：已领返回 `replayed`，不会重复发放）；旧 sash 签到接口仅在仍开放时兜底（能力运行时探测，404 记「本区域无此接口」6 小时后自动重探）；Pro 升级包资格检查与领取、quota/usage 额度与套餐快照实时刷新。
 - **统一出站网络层（三档代理模式）**：所有出站请求（模型推理、活动领取、账号接口、模型清单、辅助脚本）统一经过 `qoder_net`——**跟随系统代理**（Windows 直读 Internet Settings 注册表，不受终端环境变量污染）/ **手动指定代理**（如 `http://127.0.0.1:7897`）/ **直连**；看板「设置 → 网络代理」即改即生效，环境变量 `QD_PROXY_MODE`/`QD_PROXY_URL` 可覆盖；本机回环始终直连。
 - **后台常驻定时调度器**：每日整点排程（09:00 / 21:00 签到 · 22:00 Token 集中保活），`drt-` / `jrt-` 按前缀路由刷新，PAT 最终兜底。
 - **双协议全功能支持**：同时支持标准 OpenAI Chat Completions 协议与 Responses API (Codex / Claude Code)，含 custom freeform 工具（`apply_patch`）双向转译与 DSML 工具调用回退解析。
@@ -221,8 +221,8 @@ docker run -d --name qoder-proxy --restart unless-stopped \
 **当前官方机制 = 活动平台领取**（`Account.campaign_checkin()`），网关直接完成领取：
 
 - **列表**：`GET /sash/api/v1/me/campaigns`（双区域通用）——**必须同时满足两层**，缺一层都会静默少活动：
-  1. **桌面端请求头**（`Cosy-ClientType: 10` + `Cosy-Version` + 机器头 + `UA: Qoder`）；缺了 → 服务端不报错、直接返回**空列表**；
-  2. **真实机器身份**（`Cosy-MachineToken/Type/Code`）——官方桌面端在拉活动前会 spawn 自带的风控桥 `resources/umid/runtime-info.exe prod --account-stdin`（stdin `{"account": <uid>}`）取真值；用派生假值时列表会**静默少掉设备定向活动**（「每日领取 100 Credits」即其中之一）。网关现在调用同一个官方二进制取真值（结果按区域缓存 **30 分钟**、领取前强制刷新、列表被判为未认可时自动换新身份重试，`QD_NATIVE_IDENTITY=0` 可关闭），失败才回退派生值并在活动状态里标注 `identity=derived`；
+  1. **桌面端请求头**（`Cosy-ClientType: 10` + `Cosy-Version` + `UA: Qoder`；缺了 → 服务端不报错、直接返回**空列表**）；
+  2. **真实机器身份**（`Cosy-MachineToken/Type/Code`）——官方桌面端在拉活动前会 spawn 自带的风控桥 `resources/umid/runtime-info.exe prod --account-stdin`（stdin `{"account": <uid>}`）取真值。**机器头只在拿到真身份时才发**（上游 issue #10：整套**派生**假头会被服务端判定为非官方客户端，把「每日领取 100 Credits」这类 CLAIMABLE 活动**整条过滤**，列表只剩 VIEW_DETAILS 且不报错；无真身份时六个 `cosy-machine*` 头一个都不发）。网关调用同一个官方二进制取真值（结果按区域缓存 **30 分钟**、领取前强制刷新、列表被判为未认可时自动换新身份重试，`QD_NATIVE_IDENTITY=0` 可关闭）；活动状态里两个维度分别如实标注：`identity`（runtime-info / derived，身份从哪来）与 `machine_headers`（native / omitted，本次到底发没发），国际版 + omitted 时会附「已知限制」提示——**不等于今天没有活动**；
      - **跨区借用**：机器身份是**机器级、与区域无关**的（实测同一机器上国内/国际账号取到的 token/type/code 完全一致，桥的输出里也没有区域字段）。因此**只装了单区客户端时，另一区借用同一个桥**（本区域客户端 > 本区域 CLI 缓存 `~/.qoder-cn(.qoder)/.bin/umid-*` > 另一区，`QD_RUNTIME_INFO=<路径>` 可显式指定）——以前"只装国内版 → 国际账号一直是派生假身份"的短板已修复；
 - **领取**：对 `claimStatus=CLAIMABLE` 且 `actionType=CLAIM_BENEFIT` 的活动 `POST /sash/api/v1/me/campaigns/{campaignId}/claim`（逆向自官方 `growth-page/activity-iframe` 页面 JS）。**官方幂等**：已领取返回 `{"status":"CLAIMED","replayed":true}`，不会重复发放；`GET …/{id}/reward` 可查发放状态；
 - **券/兑换码类奖励**（`benefit.kind=REDEMPTION_CODE/REDEMPTION_COUPON/COUPON`）：领取端点与积分活动相同，奖励码在响应的 `redemptionCode` 字段（官方前端语义：CLAIMED 且码非空才算拿到，否则"确认中"）。网关把兑换码**落盘到账号文件**（`campaignCodes`）并在看板「兑换码 / 券」面板展示（可复制、可跳官方活动页扫码）；领取瞬间的名额发完（`REDEMPTION_CODE_OUT_OF_STOCK`）按"本轮已发完（每日 10:00 开启新一轮）"如实呈现，不算失败；
@@ -321,7 +321,7 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | GET | / | Web 用量与任务监控看板 |
 | POST | /v1/chat/completions | 标准 Chat Completions 接口 |
 | POST | /v1/responses | Responses API 协议接口 |
-| GET | /v1/models | 模型列表（动态拉取 + 静态兜底，含能力与规格宣告） |
+| GET | /v1/models | 模型列表（动态拉取 + 静态兜底，含能力与规格宣告 + `catalog_source` 只读来源标注） |
 | GET | /tasks | 签到状态、连续天数、福利包资格与额度快照 |
 | POST | /tasks/run | 触发批量签到与全部活动领奖（含券/兑换码类） |
 | POST | /tasks/travel | 批量领取 Pro 福利包 |
@@ -340,13 +340,18 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 ## 六、开发与测试
 
 ```bash
-# 离线确定性测试（503 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
+# 离线确定性测试（559 项断言：AES-128/256 向量与官方 fixture KAT、QMC/凭证解密、
 # 自定义 B64、COSY 签名、双区官方目录全字段（峰谷价/多窗口/思考档位/展示 id/解析）、
 # 独占路由、签到能力运行时探测与 DISABLED 归一化、活动平台归一化（含同人去重
 # BLOCKED）、成就门控任务行、虚拟化状态映射、版本检测三态、面板短缓存命中/失效、
 # DeepSeek reasoning_content 回填与 flatten 保留、请求体、信封解包、custom 工具转译、
-# 本机凭证扫描、券类兑换码落盘/中文活动名/全部账号聚合/信封层 403-10605 冷却）
+# 本机凭证扫描、券类兑换码落盘/中文活动名/全部账号聚合/信封层 403-10605 冷却、
+# 泄漏工具调用回读与截断吞掉（issue #8/#9）、机器头门控与 INTL 已知限制提示（#10）、
+# Responses 续号/终态事件、调度器状态落盘与启动补签闸门、Pro 领取幂等）
 python tests/test_qoder.py
+
+# 官方 fixture（credential/model-cache KAT）不在本机时自动 SKIP；可用环境变量指定
+QD_TEST_FIXTURE_DIR=<dir> python tests/test_qoder.py
 
 # 前端静态托管的安全与路由判定（目录穿越、接口/页面同名的尾斜杠约定）
 python tests/test_static.py
@@ -426,6 +431,19 @@ qoder2api-hub/
 ## 七、版本与更新日志 (Changelog)
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
+
+### v1.2.6
+
+**移植上游 v1.2.0–v1.2.3（泄漏工具调用回读、机器头门控、Responses / 调度器 / 安全审计修复）**
+
+- **泄漏的工具调用文本「回读」**（上游 issue #8）：网关把 assistant 历史里的 `tool_calls` 序列化成 `[assistant 请求调用工具] + JSON 数组` 交给上游当上下文；长会话里模型偶发**照格式复述**成正文，客户端就会把这段 JSON 当正文显示、本轮工具调用不执行。现在在严格守卫下（整段恰好是该形态、数组非空、名字在本次声明的 tools 内、arguments 是合法 JSON）还原成结构化 `tool_calls`：非流式 chat、流式 chat、Responses（流式 + 非流式）三条路径都覆盖；流式路径按住前缀候选、被证伪立刻原样补发（fail-open，绝不吞正常文本）；
+- **截断的回声直接丢弃**（上游 issue #9）：模型复述到一半被截断（JSON 不完整）时，既无法还原也不能把网关内部协议文本透给终端用户——三个条件同时成立才吞（以 marker 开头 + 本次声明了 tools + 其后仍是 JSON 数组前缀）。完整但未声明工具名的数组仍按 fail-open 原样透传；
+- **机器头门控**（上游 issue #10）：服务端把**全套派生** `cosy-machine*` 六头判定为非官方客户端，会把「每日领取 100 Credits」这类 CLAIMABLE 活动**整条过滤**（列表只剩 VIEW_DETAILS，且不报错——首次领取时最易误判成"本来就没活动"）。现在只在原生桥给出真身份时才发这六个头；无原生桥**一个都不发**（只发 `UA` / `cosy-clienttype` / `cosy-version`），并在活动状态里如实标注 `machine_headers: native|omitted`（与 `identity` 来源正交）。国际版 + 未发头时给出「已知限制」提示（不再当成"今天没有活动"），国内版不发头是正确行为、不给提示；
+- **修复身份自愈条件永不命中**：消费端（活动列表被判为未认可时的"换新身份重试"）此前拿 `identity == "native"` 比较，而生产端写入的是 `runtime-info` —— 该分支从未生效；现已按真实取值修正（`"native"` 仅保留为历史测试桩兼容别名）；
+- **Responses API 三项修复**：① 流内重试与重开上游改用**转换后的 chat 请求体**（此前用原始 Responses 体会话在 `input` 字段，重开后会话丢失）；② 流式失败补发 `response.failed` 终态事件（此前只关流，客户端会一直等）；③ 重开后 `sequence_number` 从 holder 续号（不再回退到 0）；
+- **调度器状态落盘**：`enabled` / 上次运行 / 日志 / 「启动补签已做过」标记写入 `<账号目录>/scheduler/state.json`（子目录，不会被账号池当成账号）。启动巡检的补签**同一天最多一次**（mark-before-act：先落盘标记再动作，崩溃重启也不重放）——此前反复重启网关会反复发真实领取请求；
+- **审计修复（安全 / 正确性）**：`/settings/reveal` 在面板仍用默认密码时拒绝返回明文 API Key；局域网模式 + 默认密码启动时打印安全警告；Pro 升级包「已领取」不再虚增 `+1800`（`credit_added` 只计本轮真实新增，新增 `state` / `already_count` 字段）；签到节奏统一 `>= 1.0s`（单账号路径原为 0.4s，现与批量一致并保证账号间间隔）；`/v1/completions` 明确 404（此前会按空会话转发上游白烧额度）；`/v1/models` 新增只读 `catalog_source`（模型数据来自哪一级源）；导入账号时运行期字段不采信（白名单构造）；Dockerfile 的 `CMD` 不再硬编码 `--host/--port`（`docker run -e PORT=9000` 与 compose 的 environment 真正生效）；
+- **测试**：新增 54 条断言（泄漏回读守卫 / 截断吞掉 / 机器头四组合 / Responses 续号与终态事件 / 调度器落盘与闸门 / Pro 幂等 / catalog_source），离线套件 `559 PASS / 0 FAIL / 3 SKIP`；官方 fixture 目录改为可配置探测（`QD_TEST_FIXTURE_DIR`，缺失时 SKIP 而不是 FAIL）。
 
 ### v1.2.5
 

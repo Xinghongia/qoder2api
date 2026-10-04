@@ -14,7 +14,8 @@ import socket
 from .logbus import log
 from .sanitize import strip_data_prefix
 from .chat_normalize import (_new_id, parse_dsml_tool_calls,
-                              DSML_CALLS_RE)
+                              DSML_CALLS_RE, parse_leaked_tool_calls,
+                              leak_prefix_hold, leaked_partial_droppable)
 
 
 
@@ -451,7 +452,11 @@ def stream_responses_events(inner_lines, model, holder):
     """
     resp_id, msg_id, rs_id = _new_id("resp_"), _new_id("msg_"), _new_id("rs_")
     created = int(time.time())
-    seq = 0
+    # 上游重开后本生成器会被重建：若 seq 从 0 重来，客户端看到的
+    # sequence_number 会回退。从 holder 恢复历史最大号，保证严格单调。
+    seq = int(holder.get("seq") or 0) if isinstance(holder, dict) else 0
+    if isinstance(holder, dict):
+        holder["resp_id"] = resp_id
     text_parts, reason_parts = [], []
     outputs = []
     reason_index = None
@@ -485,6 +490,8 @@ def stream_responses_events(inner_lines, model, holder):
     def ev(etype, payload_obj):
         nonlocal seq
         seq += 1
+        if isinstance(holder, dict):
+            holder["seq"] = seq        # 供外层补发终态事件时续号
         data = {"type": etype, "sequence_number": seq}
         data.update(payload_obj)
         body = json.dumps(data, ensure_ascii=False)
@@ -626,7 +633,11 @@ def stream_responses_events(inner_lines, model, holder):
                     })
                 # DSML 缓冲：不把原始 DSML 标签流给客户端
                 text_buffer += piece
-                while text_buffer:
+                # 泄漏回读（issue #8）：正文还一个字没吐、缓冲仍是
+                # 「marker + JSON 数组」候选时先压住，流末统一判定。
+                _leak_defer = not any(text_parts) and leak_prefix_hold(
+                    text_buffer)
+                while text_buffer and not _leak_defer:
                     idx = text_buffer.find("<")
                     if idx == -1:
                         text_parts.append(text_buffer)
@@ -735,7 +746,28 @@ def stream_responses_events(inner_lines, model, holder):
                  {"output_index": entry["output_index"], "item": fc_item})
     # 冲刷剩余缓冲文本
     if text_buffer:
-        calls_rem, clean_rem = parse_dsml_tool_calls(text_buffer)
+        leak_calls, leak_clean = (None, text_buffer)
+        dropped_leak = False
+        if not any(text_parts):
+            leak_calls, leak_clean = parse_leaked_tool_calls(
+                text_buffer, holder.get("allowed_names"))
+            if leak_calls is None and leaked_partial_droppable(
+                    text_buffer, holder.get("allowed_names")):
+                dropped_leak = True
+        if leak_calls:
+            dsml_tool_calls.extend(
+                {"id": c.get("id"),
+                 "name": (c.get("function") or {}).get("name") or "",
+                 "arguments": (c.get("function") or {}).get("arguments") or "{}"}
+                for c in leak_calls)
+            calls_rem, clean_rem = None, leak_clean
+        elif dropped_leak:
+            # issue #9：截断的 marker+JSON 回声 -> 不输出文本、不走 DSML 回退。
+            log("dropped truncated leaked tool-call echo (%d chars) — issue #9"
+                % len(text_buffer), level="WARN", tag="chat")
+            calls_rem, clean_rem = None, None
+        else:
+            calls_rem, clean_rem = parse_dsml_tool_calls(text_buffer)
         if calls_rem:
             dsml_tool_calls.extend(calls_rem)
         if clean_rem:
@@ -818,3 +850,25 @@ def stream_responses_events(inner_lines, model, holder):
     if finish == "length":
         final["incomplete_details"] = {"reason": "max_output_tokens"}
     yield ev("response.completed", {"response": final})
+
+
+def responses_failed_frame(holder, code, message):
+    """Responses 流的终态失败事件（response.failed）。
+
+    stream_responses_events 的 ev() 闭包把最新 sequence_number 同步进
+    holder["seq"]，这里在其上 +1 续号，保证严格大于已发出的事件——
+    Responses 客户端只认终态事件，缺了它会一直等（原实现只 _sse_end）。
+    """
+    seq = int((holder or {}).get("seq") or 0) + 1
+    data = {
+        "type": "response.failed",
+        "sequence_number": seq,
+        "response": {
+            "id": (holder or {}).get("resp_id") or _new_id("resp_"),
+            "object": "response",
+            "status": "failed",
+            "error": {"code": str(code), "message": message},
+        },
+    }
+    return ("event: response.failed\ndata: "
+            + json.dumps(data, ensure_ascii=False) + "\n\n").encode("utf-8")

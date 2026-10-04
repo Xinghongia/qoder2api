@@ -15,7 +15,9 @@ from ..affinity import prompt_fingerprint
 from ..usage import record_error, record_usage
 from ..sanitize import clean_responses_frame
 from ..responses import (chat_to_response, custom_tool_names,
-                         responses_to_chat, stream_responses_events)
+                         responses_to_chat, stream_responses_events,
+                         responses_failed_frame)
+from ..chat_normalize import tool_names_from_payload
 from ..upstream import (RateLimited, TRANSIENT_MAX_RETRIES,
                         _handle_envelope_account_cooldown,
                         _to_int_status, aggregate_with_envelope_retry,
@@ -40,7 +42,8 @@ class ResponsesRoutesMixin(object):
             % (model, want_stream, len(chat_req.get("messages") or []),
                chat_req.get("reasoning_effort"),
                sorted(custom_names) or "-"))
-        holder = {"usage": None, "custom_names": custom_names}
+        holder = {"usage": None, "custom_names": custom_names,
+                  "allowed_names": tool_names_from_payload(chat_req)}
         try:
             # None = 未显式绑定出口：交给 open_upstream 按面板模式路由
             #（双区=优先出口失效时自动切换）
@@ -131,8 +134,11 @@ class ResponsesRoutesMixin(object):
                                     level="WARN", tag="chat")
                                 time.sleep(attempts)
                                 try:
+                                    # 必须用转换后的 chat 请求体重开：原始
+                                    # Responses 体的会话在 input 字段里，而
+                                    # build_qoder_body 只读 messages -> 空会话。
                                     cur2, account, _ = upstream_mod.open_upstream(
-                                        payload, session_key=session_key,
+                                        chat_req, session_key=session_key,
                                         target_realm=req_realm)
                                 except Exception as rex:
                                     log("responses reopen failed: %s"
@@ -162,6 +168,12 @@ class ResponsesRoutesMixin(object):
                     log("responses upstream status %s: %s"
                         % (pump_exc.status, msg[:200]), level="ERROR",
                         tag="chat")
+                    # Responses 协议靠终态事件收尾：只关流会让客户端一直等。
+                    try:
+                        self._sse_write(responses_failed_frame(
+                            holder, _to_int_status(pump_exc.status), msg))
+                    except Exception:
+                        pass
                     self._sse_end()
                     return
                 self._sse_end()
@@ -174,7 +186,7 @@ class ResponsesRoutesMixin(object):
                 return
             try:
                 chat_obj, account = aggregate_with_envelope_retry(
-                    upstream, payload, session_key, req_realm, model,
+                    upstream, chat_req, session_key, req_realm, model,
                     holder, account)
             except UpstreamStatus as exc:
                 record_error(model, exc.status, exc.detail,

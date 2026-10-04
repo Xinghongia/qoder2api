@@ -1476,23 +1476,53 @@ _CN_JSON = r'''
 ]
 '''
 
+# ---------------------------------------------------------------------------
+# 模型快照来源标注（只读观测面 · 纯新增：不改任何既有字段与语义）
+#
+# 目的：让"当前模型数据来自哪一级源"可被观察（动态接口 > 本机缓存 > 本快照）。
+#   external-json   包内 assets/qoder_catalog_{intl,cn}.json（_refresh_catalog.py 产物）
+#   embedded-frozen 本文件内嵌冻结副本（外部文件缺失/不可读/非非空 list）
+# 降级原因仅用于观察，不参与任何加载决策。
+# 影响面：model_entry 的谷时价严格由 promotion 推导，降级会直接改变下游看到的
+# 峰谷价，所以"当前用的是哪一级源"值得能被外部观察。
+# ---------------------------------------------------------------------------
+SNAPSHOT_SOURCE_EXTERNAL = "external-json"
+SNAPSHOT_SOURCE_EMBEDDED = "embedded-frozen"
+
+SNAPSHOT_DEGRADE_MISSING = "file-missing"
+SNAPSHOT_DEGRADE_UNREADABLE = "unreadable-or-invalid"
+SNAPSHOT_DEGRADE_EMPTY = "empty-or-not-list"
+
+_SNAPSHOT_FILENAMES = {"intl": "qoder_catalog_intl.json",
+                       "cn": "qoder_catalog_cn.json"}
+_SNAPSHOT_SOURCES = {}          # filename -> SNAPSHOT_SOURCE_*
+_SNAPSHOT_DEGRADE_REASONS = {}  # filename -> SNAPSHOT_DEGRADE_*
+
+
 def _load_snapshot(filename, embedded):
-    """加载区域目录快照：优先同目录 JSON 文件，缺失才回退内嵌冻结副本。
+    """加载区域目录快照：优先包内 assets JSON，缺失才回退内嵌冻结副本。
 
     外部文件由 `_refresh_catalog.py` 从本机官方客户端目录缓存重新导出（客户端
     更新后重跑一次即可），格式与内嵌副本完全一致（chat 场景逐字段原样）。
     """
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "assets", filename)
+    reason = SNAPSHOT_DEGRADE_MISSING
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         if isinstance(data, list) and data:
+            _SNAPSHOT_SOURCES[filename] = SNAPSHOT_SOURCE_EXTERNAL
             return data
+        reason = SNAPSHOT_DEGRADE_EMPTY
+    except FileNotFoundError:
+        reason = SNAPSHOT_DEGRADE_MISSING
     except Exception:
-        pass
+        reason = SNAPSHOT_DEGRADE_UNREADABLE
     _warn("catalog snapshot %s missing/unreadable - falling back to the frozen "
           "built-in snapshot (may be outdated; run _refresh_catalog.py)" % filename)
+    _SNAPSHOT_SOURCES[filename] = SNAPSHOT_SOURCE_EMBEDDED
+    _SNAPSHOT_DEGRADE_REASONS[filename] = reason
     return json.loads(embedded)
 
 
@@ -1732,3 +1762,54 @@ def official_local_name(key):
         if m["key"] == key:
             return "" if lab == m.get("display_name") else lab
     return lab
+
+
+# ---------------------------------------------------------------------------
+# 只读观测面：当前快照来源（供 /v1/models 等对外接口与诊断复用）
+#
+# 纯查询接口，不改变任何既有语义。对外接线：/v1/models 响应加
+# catalog_source 字段（由 api/routes_get.py 负责；本模块不反向依赖它）。
+# ---------------------------------------------------------------------------
+def snapshot_source(realm):
+    """该区域快照的**实际**来源（只读）。
+
+    返回 SNAPSHOT_SOURCE_EXTERNAL（包内 assets JSON，_refresh_catalog.py 产物）
+    或 SNAPSHOT_SOURCE_EMBEDDED（内嵌冻结副本 = 已降级，数据可能过期）。
+    realm 非 "intl" 时按 "cn" 处理，与 models_for_realm() 的默认分支保持一致。
+    """
+    fn = _SNAPSHOT_FILENAMES.get(realm) or _SNAPSHOT_FILENAMES["cn"]
+    return _SNAPSHOT_SOURCES.get(fn) or SNAPSHOT_SOURCE_EMBEDDED
+
+
+def snapshot_report():
+    """两区来源标注 + 降级原因 + 与内嵌副本的差异 key（只读诊断）。
+
+    返回 {realm: {"source", "degrade_reason", "models", "embedded_diff_keys"}}。
+    embedded_diff_keys 非空 = 外部 JSON 已与本文件内嵌副本漂移：此时若发生降级
+    （外部文件丢失/损坏），这些模型的字段会整体换一套口径（峰谷价尤其明显）。
+    注意：已降级（source=embedded-frozen）时该列表恒为空——比较对象此时就是内嵌
+    副本自身；「是否已降级」请读 source / degrade_reason 两个字段，别看这个列表。
+    """
+    out = {}
+    for realm, fn in _SNAPSHOT_FILENAMES.items():
+        embedded = json.loads(_INTL_JSON if realm == "intl" else _CN_JSON)
+        out[realm] = {
+            "source": snapshot_source(realm),
+            "degrade_reason": _SNAPSHOT_DEGRADE_REASONS.get(fn, ""),
+            "models": len(models_for_realm(realm)),
+            "embedded_diff_keys": sorted(
+                _snapshot_key_diffs(embedded, models_for_realm(realm))),
+        }
+    return out
+
+
+def _snapshot_key_diffs(embedded, loaded):
+    """两侧「key 集合差 + 同 key 任一字段不同」的 key 集合（只读）。"""
+    emb = {m.get("key"): m for m in embedded if isinstance(m, dict)}
+    cur = {m.get("key"): m for m in loaded if isinstance(m, dict)}
+    diffs = set(emb) ^ set(cur)
+    for k in set(emb) & set(cur):
+        a, b = emb[k], cur[k]
+        if any(a.get(f) != b.get(f) for f in set(a) | set(b)):
+            diffs.add(k)
+    return diffs

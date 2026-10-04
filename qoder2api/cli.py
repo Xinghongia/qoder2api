@@ -169,6 +169,11 @@ def main():
     elif qoder_settings.panel_password_is_default(runtime.ACCOUNTS_DIR):
         log("panel      : password is still the default 'admin' - change it "
             "in the panel")
+        if args.host == "0.0.0.0":
+            log("SECURITY   : LAN mode + default panel password 'admin' - "
+                "anyone on this network can log in and read your API key. "
+                "Change it in the panel, or restart with --panel-password.",
+                level="WARN")
 
     # 出站代理模式（面板「设置 → 网络代理」可改；环境变量覆盖优先）
     qoder_net.load_from_settings(runtime.ACCOUNTS_DIR)

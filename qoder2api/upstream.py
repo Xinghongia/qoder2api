@@ -31,7 +31,8 @@ from .sign import SESSIONS, qoder_encode
 from .body import CHAT_PATH, build_qoder_body
 from .sanitize import clean_chunk, strip_data_prefix
 from .realm import pick_serving_realm, realm_candidates
-from .chat_normalize import _new_id
+from .chat_normalize import (_new_id, tool_names_from_payload,
+                             parse_leaked_tool_calls, leaked_partial_droppable)
 from .security import validate_public_http_url
 
 
@@ -320,7 +321,8 @@ def aggregate_with_envelope_retry(resp, payload, session_key, realm, model,
     try:
         for attempt in range(TRANSIENT_MAX_RETRIES + 1):
             try:
-                obj = aggregate_stream(cur, model, None, holder=holder)
+                obj = aggregate_stream(cur, model, None, holder=holder,
+                                       allowed_names=tool_names_from_payload(payload))
                 return obj, account
             except UpstreamStatus as exc:
                 # 信封层 403/10605、429、死会话：冷却该账号 + 解绑会话亲和
@@ -777,8 +779,12 @@ def iter_inner_sse(resp, holder=None):
         yield ("data: " + cleaned + "\n\n").encode("utf-8")
 
 
-def aggregate_stream(resp, model, resp_id=None, holder=None):
-    """把上游信封流折叠成一个非流式 chat.completion 对象。"""
+def aggregate_stream(resp, model, resp_id=None, holder=None, allowed_names=None):
+    """把上游信封流折叠成一个非流式 chat.completion 对象。
+
+    allowed_names：本次请求声明的工具名集合；用于「泄漏文本回读」的守卫
+    （见 chat_normalize.parse_leaked_tool_calls / issue #8）。
+    """
     content, reasoning, finish = [], [], "stop"
     tool_calls_map = {}
     usage = holder.get("usage") if holder else None
@@ -809,7 +815,17 @@ def aggregate_stream(resp, model, resp_id=None, holder=None):
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
             if delta.get("content"):
-                content.append(delta["content"])
+                _c = delta["content"]
+                if isinstance(_c, str):
+                    content.append(_c)
+                elif isinstance(_c, list):
+                    # 防御：非字符串 content（parts 列表）展开而非让聚合器崩
+                    for _p in _c:
+                        if isinstance(_p, str):
+                            content.append(_p)
+                        elif (isinstance(_p, dict)
+                              and isinstance(_p.get("text"), str)):
+                            content.append(_p["text"])
             if delta.get("reasoning_content"):
                 reasoning.append(delta["reasoning_content"])
             for tc in delta.get("tool_calls") or []:
@@ -858,6 +874,19 @@ def aggregate_stream(resp, model, resp_id=None, holder=None):
     message = {"role": "assistant", "content": "".join(content)}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
+    # 回读（issue #8）：上游未给结构化 tool_calls，但正文恰好是网关自己写入
+    # 历史的「LEAK_MARKER + JSON 数组」形态（模型照格式复述）——还原为结构化
+    # 调用并从正文移除，避免客户端把 JSON 当正文显示、本轮调用不执行。
+    if not tool_calls_map and message.get("content"):
+        _rec, _clean = parse_leaked_tool_calls(message["content"], allowed_names)
+        if _rec:
+            message["content"] = _clean
+            tool_calls_map = {i: c for i, c in enumerate(_rec)}
+        elif leaked_partial_droppable(message["content"], allowed_names):
+            # issue #9：截断的 marker+JSON 回声不还原、也不透传，直接清空正文。
+            log("dropped truncated leaked tool-call echo (%d chars) — issue #9"
+                % len(message["content"]), level="WARN", tag="chat")
+            message["content"] = ""
     # 二次防御：剔除「无函数名」的空 tool_call，防止客户端死等
     if tool_calls_map:
         tool_calls_map = {k: v for k, v in tool_calls_map.items()

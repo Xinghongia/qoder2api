@@ -5,8 +5,10 @@ services:
     container_name: qoder-proxy
     restart: unless-stopped
     ports:
+      # 宿主机:容器。改容器监听端口时 PORT 与这里要一起改
       - "8790:8790"
     environment:
+      # HOST/PORT 真实生效：镜像 CMD 不再硬编码 --host/--port（argparse 读环境变量）
       - HOST=0.0.0.0
       - PORT=8790
       # - API_KEY=your_api_key_here

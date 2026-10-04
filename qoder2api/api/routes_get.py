@@ -145,8 +145,14 @@ class GetRoutesMixin(object):
             except Exception as exc:
                 return self._error(502, str(exc))
             data = [model_entry(mid, meta) for mid, meta in entries]
+            try:
+                catalog_source = qoder_catalog.snapshot_source(req_realm)
+            except Exception as exc:   # 只读探针：失败也不能拖垮模型列表
+                catalog_source = "unknown"
+                log("catalog source probe failed: %s" % exc, level="WARN")
             return self._json(200, {"object": "list", "data": data,
-                                    "realm": req_realm})
+                                    "realm": req_realm,
+                                    "catalog_source": catalog_source})
         if path in ("/usage", "/v1/usage"):
             if not self._authorized():
                 return
@@ -307,6 +313,13 @@ class GetRoutesMixin(object):
             if not self._panel_ok():
                 return self._error(401, "panel password required",
                                    "invalid_request_error")
+            if qoder_settings.panel_password_is_default(runtime.ACCOUNTS_DIR):
+                # 默认密码 = 局域网内任何人都能登录；明文 Key 不能这样交出去。
+                return self._error(
+                    403,
+                    "面板仍在使用默认密码，局域网内任何人都能登录后读到明文 API "
+                    "Key。请先在「设置 → 面板密码」修改密码，再查看明文 Key。",
+                    "permission_error")
             wanted = (query.get("id") or [""])[0]
             for entry in configured_keys():
                 if entry.get("id") == wanted:

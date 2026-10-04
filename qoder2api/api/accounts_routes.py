@@ -16,6 +16,7 @@ from .. import upstream as upstream_mod
 from ..views import account_views
 from ..realm import acc_realm, save_persisted_realm
 from ..upstream import (RateLimited, aggregate_stream)
+from ..tasks import CHECKIN_MIN_GAP
 from ..logbus import clear_logs
 
 
@@ -105,6 +106,7 @@ class AccountsRoutesMixin(object):
                 "msg": res["msg"],
                 "logs": res["logs"],
                 "accounts_count": res["accounts_count"],
+                "already_count": res.get("already_count", 0),
             })
         if path == "/scheduler/trigger":
             if runtime.SCHEDULER:
@@ -138,16 +140,26 @@ class AccountsRoutesMixin(object):
             # 账号面板的「每日签到」按钮：**只做每日签到领积分**——Credits 类活动
             # （如"每天领 100 Credits"，旧 sash 接口兜底），不领券/兑换码类活动，
             # 也不领 Pro 福利包（那些走签到与福利中心的按钮）。
-            from qoder2api import tasks as qoder_tasks
             uid = payload.get("uid")
             targets = [runtime.POOL.get(uid)] if uid else list(runtime.POOL.accounts)
             results = []
+            last_at = None
             for account in targets:
                 if account is None:
                     continue
                 if not account.enabled or not account.access_token:
-                    continue
-                res = qoder_tasks.run_checkin(account, gap=0.4, only_daily=True)
+                    continue            # 跳过的账号不占用防风控等待
+                if last_at is not None:
+                    # 账号之间保持 >= CHECKIN_MIN_GAP（与 tasks 声明的 >=1.0s
+                    # 一致）；try/finally 让失败路径同样计时间隔。
+                    idle = CHECKIN_MIN_GAP - (time.time() - last_at)
+                    if idle > 0:
+                        time.sleep(idle)
+                try:
+                    res = qoder_tasks.run_checkin(account, gap=CHECKIN_MIN_GAP,
+                                                  only_daily=True)
+                finally:
+                    last_at = time.time()
                 # 签到后顺手刷新额度快照：账号行的积分列与"更新于"随点击更新
                 try:
                     account.fetch_credits()

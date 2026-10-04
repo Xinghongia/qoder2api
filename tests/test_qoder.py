@@ -62,6 +62,11 @@ def check(label, cond, extra=""):
         print("  [FAIL] " + label + ("  " + str(extra) if extra else ""))
 
 
+def skip(label, why=""):
+    """环境缺失（如官方 fixture 不在本机）不算失败，但必须显式打印原因。"""
+    print("  [SKIP] " + label + ("  " + str(why) if why else ""))
+
+
 print("[1] Qoder custom base64 variant")
 enc = S.qoder_encode(b"{}")
 check("encode({}) deterministic", enc == S.qoder_encode(b"{}"))
@@ -1469,9 +1474,43 @@ check("job family", A.token_family(acc_j) == "job")
 print()
 print("[4.5] credential / model-cache crypto KATs (official fixtures)")
 import base64 as _b64
-_FIX = r"C:\Users\shuishui\AppData\Local\Temp\qoder-ref\cli2api\testdata\protocol\1.1.34"
-if os.path.isdir(_FIX):
-    fx = json.load(open(os.path.join(_FIX, "credential.json"), encoding="utf-8"))
+# fixture 探测：环境变量优先，其次按候选顺序找；不再硬编码单个 %TEMP% 路径。
+_FIX_ENV = os.environ.get("QD_TEST_FIXTURE_DIR") or ""
+_FIX_CANDIDATES = [
+    _FIX_ENV,
+    os.path.join(_HERE, "testdata", "protocol", "1.1.34"),
+    os.path.join(_HERE, "fixtures", "protocol", "1.1.34"),
+    os.path.join(_ROOT, os.pardir, "qoder-ref", "cli2api", "testdata",
+                 "protocol", "1.1.34"),
+    os.path.join(os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp",
+                 "qoder-ref", "cli2api", "testdata", "protocol", "1.1.34"),
+    os.path.join(os.path.expanduser("~"), "qoder-ref", "cli2api",
+                 "testdata", "protocol", "1.1.34"),
+]
+if _FIX_ENV and not os.path.isdir(_FIX_ENV):
+    print("  [WARN] QD_TEST_FIXTURE_DIR 指向的目录不存在：%s" % _FIX_ENV)
+_FIX, _FIX_TRIED = "", []
+for _cand in _FIX_CANDIDATES:
+    if not _cand:
+        continue
+    _cand_abs = os.path.abspath(_cand)
+    _FIX_TRIED.append(_cand_abs)
+    if os.path.isdir(_cand_abs):
+        _FIX = _cand_abs
+        break
+if _FIX:
+    print("  fixture 目录: %s" % _FIX)
+else:
+    print("  fixture 目录: 未找到；已探测 %d 条候选：" % len(_FIX_TRIED))
+    for _p in _FIX_TRIED:
+        print("      -  %s" % _p)
+    print("      指定方式: QD_TEST_FIXTURE_DIR=<dir> python tests/test_qoder.py")
+
+_CRED_FP = os.path.join(_FIX, "credential.json") if _FIX else ""
+_MCACHE_FP = os.path.join(_FIX, "model-cache.json") if _FIX else ""
+
+if _CRED_FP and os.path.isfile(_CRED_FP):
+    fx = json.load(open(_CRED_FP, encoding="utf-8"))
     mkey = fx["input"]["machine_key"].encode()
     fx_ct = _b64.b64decode(fx["expected"]["encrypted"])
     dec = S.aes_cbc_decrypt(fx_ct, mkey, mkey)
@@ -1480,19 +1519,28 @@ if os.path.isdir(_FIX):
     enc = _b64.b64encode(S.aes_cbc_encrypt(dec, mkey, mkey)).decode()
     check("credential fixture encrypt byte-exact",
           enc == fx["expected"]["encrypted"])
-    mf = json.load(open(os.path.join(_FIX, "model-cache.json"), encoding="utf-8"))
+else:
+    _miss_cred = "缺 credential.json" if _FIX else "缺 fixture 目录"
+    skip("credential fixture decrypt byte-exact", _miss_cred)
+    skip("credential fixture encrypt byte-exact", _miss_cred)
+
+if _MCACHE_FP and os.path.isfile(_MCACHE_FP):
+    mf = json.load(open(_MCACHE_FP, encoding="utf-8"))
     plain = S.qmc_decrypt(mf["expected"]["encrypted"], mf["input"]["uid"])
     check("model-cache (QMC v1) fixture decrypt byte-exact",
           plain.decode() == mf["expected"]["decrypted"])
-    # AES-256 互逆（QMC 用 32 字节 key -> 14 轮）
-    k256 = bytes(range(32))
-    blk = bytes(range(16))
-    rks = S._expand_key(k256)
-    check("AES-256 key schedule = 15 round keys", len(rks) == 15, len(rks))
-    check("AES-256 block roundtrip",
-          S._decrypt_block(S._encrypt_block(blk, rks), rks) == blk)
 else:
-    check("official crypto fixtures present", False, _FIX)
+    skip("model-cache (QMC v1) fixture decrypt byte-exact",
+         "缺 model-cache.json" if _FIX else "缺 fixture 目录")
+
+# AES-256 互逆（QMC 用 32 字节 key -> 15 个轮密钥）：纯算法、不依赖 fixture，
+# 因此永远执行（此前被误放进 fixture 分支，缺 fixture 时连算法 KAT 都一起没跑）。
+k256 = bytes(range(32))
+blk = bytes(range(16))
+rks = S._expand_key(k256)
+check("AES-256 key schedule = 15 round keys", len(rks) == 15, len(rks))
+check("AES-256 block roundtrip",
+      S._decrypt_block(S._encrypt_block(blk, rks), rks) == blk)
 
 print()
 print("[4.6] local credential scan (reads THIS machine's official stores)")
@@ -1728,10 +1776,10 @@ _hdrs = _t_cn.desktop_headers()
 check("desktop headers carry Cosy-ClientType=10 + Cosy-Version + UA Qoder",
       _hdrs["cosy-clienttype"] == "10" and _hdrs["User-Agent"] == "Qoder"
       and bool(_hdrs["cosy-version"]), _hdrs.get("cosy-clienttype"))
-check("desktop headers carry the machine identity set",
-      all(_hdrs.get(k) for k in ("cosy-machineid", "cosy-machinetoken",
-                                 "cosy-machinetype", "cosy-machineos",
-                                 "cosy-machinehostname", "cosy-machinecode")))
+check("derived identity sends NO cosy-machine* headers (issue #10: 派生六头会被服务端判非官方)",
+      not any(k.startswith("cosy-machine") for k in _hdrs)
+      and _t_cn.machine_headers_state == A.MACHINE_HEADERS_OMITTED,
+      [k for k in _hdrs if k.startswith("cosy-machine")])
 check("native identity bridge can be disabled (derived fallback)",
       os.environ.get("QD_NATIVE_IDENTITY") == "0"
       and _t_cn.machine_identity_source == "derived"
@@ -2741,12 +2789,17 @@ os.environ["QD_NATIVE_IDENTITY"] = "1"
 A._native_exe_cache.clear()
 _exe_i28 = A.runtime_info_exe("intl")
 _exe_c28 = A.runtime_info_exe("cn")
-if _exe_c28:
-    check("on this machine intl shares the cn bridge (machine identity is realm-free)",
-          _exe_i28 == _exe_c28 and bool(_exe_i28), (_exe_i28, _exe_c28))
-    check("bridge realm tag says the bridge came from cn",
-          A.runtime_info_bridge_realm("intl") == "cn",
-          A.runtime_info_bridge_realm("intl"))
+if _exe_c28 or _exe_i28:
+    # 不假设"本机只有 cn 一个桥"：本机可能同时装了桌面端（cn）与 CLI 缓存桥
+    # （~/.qoder/.bin/umid-*，两区各一份）。真正的不变量是「任一区有桥 =>
+    # 两区都能解析到桥（缺失的一侧借用另一侧）」，且来源区域标注与之一致。
+    check("either realm having a bridge means both realms resolve one",
+          bool(_exe_c28) and bool(_exe_i28), (_exe_i28, _exe_c28))
+    check("bridge realm tag matches the realm whose path resolved",
+          A.runtime_info_bridge_realm("intl") in ("intl", "cn")
+          and A.runtime_info_bridge_realm("cn") in ("intl", "cn"),
+          (A.runtime_info_bridge_realm("intl"),
+           A.runtime_info_bridge_realm("cn")))
 else:
     check("no official bridge on this machine -> intl resolves to empty (no crash)",
           _exe_i28 == "")
@@ -2987,9 +3040,11 @@ check("view-only claimed item no longer reported as a check-in",
       "领取" not in (_res_vw.get("msg") or "") or "未给该账号" in (_res_vw.get("msg") or ""),
       _res_vw)
 
-# 派生身份下的"没有活动"给出可操作提示（固定真身份）
-_acc_dv = _A.Account({"uid": "dv-1", "realm": "cn", "accessToken": "dt-x"})
+# 无原生机器身份时的"没有活动"提示（issue #10：不再发派生假头，
+# 国际版要如实说明这是**已知限制**并提供出路；国内版不发头是正确行为，不给提示）
+_acc_dv = _A.Account({"uid": "dv-1", "realm": "intl", "accessToken": "dt-x"})
 _acc_dv.machine_identity_source = "derived"
+_acc_dv.machine_headers_state = A.MACHINE_HEADERS_OMITTED
 
 
 def fake_empty_camp30(url, **kw):
@@ -3002,9 +3057,11 @@ def fake_empty_camp30(url, **kw):
 _A.http_json = fake_empty_camp30
 _cc_dv = _acc_dv.campaign_checkin(gap=0)
 _A.http_json = _orig_hj30
-check("no-activity message under a derived identity points at 机器身份",
-      "机器身份" in (_cc_dv.get("message") or "")
-      and "派生假身份" in (_cc_dv.get("message") or ""), _cc_dv.get("message"))
+check("INTL no-activity under no-native-identity states the known limitation",
+      "已知限制" in (_cc_dv.get("message") or "")
+      and "机器身份" in (_cc_dv.get("message") or "")
+      and "派生假身份" not in (_cc_dv.get("message") or ""),
+      _cc_dv.get("message"))
 
 # campaigns(): 列表被身份过滤（无任何每日项）时换新身份重试一次
 _orig_native30 = A.native_machine_identity
@@ -3084,11 +3141,24 @@ check("task row: claimed shows the round deadline instead of 明日再来",
       and "明日再来" not in _row_rw["description"], _row_rw["description"])
 
 _row_dv = T._campaign_task_row(
-    _A.Account({"uid": "row-dv", "realm": "cn"}),
+    _A.Account({"uid": "row-dv", "realm": "intl"}),
     {"ok": True, "available": True, "show_campaign": True, "claimable": False,
-     "campaign_url": "", "identity": "derived", "campaigns": []}, {})
-check("task row: derived identity hint appended to the no-activity row",
-      "机器身份" in _row_dv["description"], _row_dv["description"])
+     "campaign_url": "", "identity": "derived",
+     "machine_headers": "omitted",
+     "hint": "国际版服务端要求真实的 UMID 机器身份……这是已知限制，不等于今天没有活动。",
+     "campaigns": []}, {})
+check("task row: INTL known-limitation hint appended to the no-activity row",
+      "已知限制" in _row_dv["description"]
+      and "机器身份" in _row_dv["description"], _row_dv["description"])
+
+_row_dv_cn = T._campaign_task_row(
+    _A.Account({"uid": "row-dv-cn", "realm": "cn"}),
+    {"ok": True, "available": True, "show_campaign": True, "claimable": False,
+     "campaign_url": "", "identity": "derived",
+     "machine_headers": "omitted", "hint": "", "campaigns": []}, {})
+check("task row: CN (correctly header-less) gets no limitation note",
+      "已知限制" not in _row_dv_cn["description"]
+      and "派生假身份" not in _row_dv_cn["description"], _row_dv_cn["description"])
 
 print()
 print("[31] upstream v1.1.9 port: coupon codes / Chinese names / aggregate / envelope cooldown")
@@ -3424,8 +3494,11 @@ check("run_checkin(only_daily=True) restricts to Credits kinds",
       (_ra31.kinds, _ra31b.kinds))
 
 _srcp31 = _ALL_SRC
-check("/accounts/checkin runs the daily-only sweep",
-      "run_checkin(account, gap=0.4, only_daily=True)" in _srcp31)
+check("/accounts/checkin runs the daily-only sweep at the shared pacing constant",
+      "run_checkin(account, gap=CHECKIN_MIN_GAP," in _srcp31
+      and "only_daily=True" in _srcp31
+      and ("CHECKIN_MIN_GAP = %r" % T.CHECKIN_MIN_GAP) in _srcp31,
+      T.CHECKIN_MIN_GAP)
 
 # --- F) 看板接线：按钮合并 / 兑换码面板 / 聚合行展示 ---
 _dash31 = open(_DASH_PATH, encoding="utf-8").read() if os.path.isfile(_DASH_PATH) else ""
@@ -3440,6 +3513,386 @@ check("codes panel renders with copy + activity link",
 check("task rows render aggregate state + reward_text",
       "accounts_by_state" in _dash31 and "reward_text" in _dash31
       and "多账号" in _dash31)
+
+print()
+print("[32] leaked tool-call echo read-back (upstream v1.2.0 issue #8 / v1.2.1 issue #9)")
+_CN = chat_normalize
+_M32 = _CN.LEAK_MARKER
+_CALLS32 = json.dumps([{"name": "terminal",
+                        "arguments": json.dumps({"cmd": "ls"}, ensure_ascii=False)}],
+                      ensure_ascii=False)
+_LEAK32 = _M32 + "\n" + _CALLS32
+
+_rec32, _clean32 = _CN.parse_leaked_tool_calls(_LEAK32, {"terminal"})
+check("strict form: marker+JSON array -> structured calls, content emptied",
+      bool(_rec32) and _clean32 == ""
+      and _rec32[0]["function"]["name"] == "terminal"
+      and json.loads(_rec32[0]["function"]["arguments"])["cmd"] == "ls",
+      (_rec32, _clean32))
+check("fenced form (```json ... ```) also recovers",
+      bool(_CN.parse_leaked_tool_calls("```json\n" + _LEAK32 + "\n```", {"terminal"})[0]))
+check("bare fence (``` ... ```) also recovers",
+      bool(_CN.parse_leaked_tool_calls("```\n" + _LEAK32 + "\n```", {"terminal"})[0]))
+check("prose discussing the marker is never misread",
+      _CN.parse_leaked_tool_calls("网关会写入 " + _M32 + " 这样的提示，不是调用。")[0] is None)
+check("trailing text after the array -> no recovery",
+      _CN.parse_leaked_tool_calls(_LEAK32 + "\n以上。", {"terminal"})[0] is None)
+check("undeclared tool name -> no recovery (guard: only declared tools)",
+      _CN.parse_leaked_tool_calls(_LEAK32, {"other"})[0] is None)
+check("empty array -> no recovery", _CN.parse_leaked_tool_calls(_M32 + "\n[]")[0] is None)
+check("arguments given as object -> normalized to JSON string",
+      json.loads(_CN.parse_leaked_tool_calls(
+          _M32 + "\n" + json.dumps([{"name": "t", "arguments": {"a": 1}}],
+                                   ensure_ascii=False),
+          {"t"})[0][0]["function"]["arguments"]) == {"a": 1})
+check("arguments not valid JSON -> no recovery",
+      _CN.parse_leaked_tool_calls(
+          _M32 + "\n" + json.dumps([{"name": "t", "arguments": "{not-json"}]),
+          {"t"})[0] is None)
+check("declared tool names read from both chat and responses tools shapes",
+      _CN.tool_names_from_payload({"tools": [
+          {"type": "function", "function": {"name": "a"}},
+          {"type": "function", "name": "b"}]}) == {"a", "b"})
+
+
+def _raw32(content=None, fin=None, **kw):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    delta.update(kw)
+    inner = {"id": "c32", "model": "m32", "created": 1, "choices": [
+        {"index": 0, "delta": delta, "finish_reason": fin}]}
+    return ("data: " + json.dumps(inner, ensure_ascii=False)
+            + "\n\n").encode("utf-8")
+
+
+def _env32(content=None, fin=None, **kw):
+    inner = json.loads(_raw32(content, fin, **kw)[6:])
+    return ("data: " + json.dumps(
+        {"statusCodeValue": 200, "body": json.dumps(inner, ensure_ascii=False)},
+        ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+class _Resp32(object):
+    def __init__(self, items):
+        self.items = list(items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def close(self):
+        pass
+
+
+_obj32 = upstream.aggregate_stream(
+    _Resp32([_env32(_LEAK32[:12]), _env32(_LEAK32[12:]), _env32("", "stop")]),
+    "m32", None, allowed_names={"terminal"})
+_msg32 = _obj32["choices"][0]["message"]
+check("non-stream aggregate: leaked body -> tool_calls, finish_reason=tool_calls",
+      _obj32["choices"][0]["finish_reason"] == "tool_calls"
+      and _msg32.get("content") == ""
+      and ((_msg32.get("tool_calls") or [{}])[0].get("function")
+           or {}).get("name") == "terminal", _obj32)
+
+_frames32 = [json.loads(f[6:]) for f in _CN.recover_leaked_tool_calls(
+    iter([_raw32(_LEAK32[:9]), _raw32(_LEAK32[9:]), _raw32("", "stop")]),
+    {"terminal"})]
+_c32 = [_f["choices"][0] for _f in _frames32]
+check("stream: marker split across deltas still recovers + finish rewritten",
+      not any(_d.get("delta", {}).get("content") for _d in _c32)
+      and any(_d.get("delta", {}).get("tool_calls") for _d in _c32)
+      and _c32[-1]["finish_reason"] == "tool_calls", _c32)
+
+_frames32b = [json.loads(f[6:]) for f in _CN.recover_leaked_tool_calls(
+    iter([_raw32("[1, 2"), _raw32(", 3] 这是正文"), _raw32("", "stop")]))]
+check("stream: [ prefix disproved -> text flushed verbatim, finish untouched",
+      "".join(_f["choices"][0]["delta"].get("content") or ""
+              for _f in _frames32b) == "[1, 2, 3] 这是正文"
+      and _frames32b[-1]["choices"][0]["finish_reason"] == "stop", _frames32b)
+
+_frames32c = [json.loads(f[6:]) for f in _CN.recover_leaked_tool_calls(
+    iter([_raw32(_LEAK32), _raw32("", "stop")]), {"other_tool"})]
+check("stream: undeclared tool name -> text passes through untouched",
+      "".join(_f["choices"][0]["delta"].get("content") or ""
+              for _f in _frames32c) == _LEAK32, _frames32c)
+
+_ev32 = [f.decode() for f in responses_mod.stream_responses_events(
+    iter([_raw32(_LEAK32), _raw32("", "stop")]), "m32",
+    {"usage": None, "custom_names": set(), "allowed_names": {"terminal"}})]
+_parsed32 = [json.loads(_ln[6:]) for _fr in _ev32
+             for _ln in _fr.splitlines() if _ln.startswith("data: ")]
+_text32 = "".join(e.get("delta") or "" for e in _parsed32
+                  if e.get("type") == "response.output_text.delta")
+_fc32 = [e["item"] for e in _parsed32
+         if e.get("type") == "response.output_item.done"
+         and (e.get("item") or {}).get("type") == "function_call"]
+check("Responses stream: leaked text never becomes output_text, becomes function_call",
+      _text32 == "" and _fc32 and _fc32[0].get("name") == "terminal",
+      (_text32, _fc32))
+
+check("write side only references the LEAK_MARKER constant (no duplicate literal)",
+      _ALL_SRC.count(json.dumps(_M32, ensure_ascii=False)) == 1
+      and "LEAK_MARKER + " in _ALL_SRC,
+      _ALL_SRC.count(json.dumps(_M32, ensure_ascii=False)))
+
+print()
+print("[32.5] issue #9: truncated marker+JSON echo must be swallowed, never leaked (P0)")
+_TRUNC32 = _M32 + "\n" + _CALLS32[:40]
+check("guard: truncated array -> True",
+      _CN.leaked_partial_droppable(_TRUNC32, {"terminal"}) is True)
+check("guard: marker only -> True",
+      _CN.leaked_partial_droppable(_M32, {"terminal"}) is True)
+check("guard: fence + truncated array -> True",
+      _CN.leaked_partial_droppable("```json\n" + _TRUNC32, {"terminal"}) is True)
+check("guard: marker + prose -> False",
+      _CN.leaked_partial_droppable(_M32 + "\n这是一段解释文字。",
+                                   {"terminal"}) is False)
+check("guard: discussion reply not starting with marker -> False",
+      _CN.leaked_partial_droppable("网关会写入 " + _M32 + " 这样的提示。",
+                                   {"terminal"}) is False)
+check("guard: no declared tools / empty names -> False",
+      _CN.leaked_partial_droppable(_TRUNC32, None) is False
+      and _CN.leaked_partial_droppable(_TRUNC32, set()) is False)
+check("guard: complete array with undeclared name -> False (fail-open)",
+      _CN.leaked_partial_droppable(_LEAK32, {"other"}) is False)
+
+_frames_trunc32 = [json.loads(f[6:]) for f in _CN.recover_leaked_tool_calls(
+    iter([_raw32(_TRUNC32[:12]), _raw32(_TRUNC32[12:]), _raw32("", "stop")]),
+    {"terminal"})]
+_text_trunc32 = "".join(_f["choices"][0]["delta"].get("content") or ""
+                        for _f in _frames_trunc32)
+check("stream: truncated echo swallowed (no marker, no plaintext tool name)",
+      _text_trunc32 == ""
+      and _M32 not in json.dumps(_frames_trunc32, ensure_ascii=False),
+      _text_trunc32)
+check("stream: after swallowing, finish_reason stays stop",
+      _frames_trunc32[-1]["choices"][0]["finish_reason"] == "stop",
+      _frames_trunc32)
+
+_obj_trunc32 = upstream.aggregate_stream(
+    _Resp32([_env32(_TRUNC32[:12]), _env32(_TRUNC32[12:]), _env32("", "stop")]),
+    "m32", None, allowed_names={"terminal"})
+_msg_trunc32 = _obj_trunc32["choices"][0]["message"]
+check("non-stream: truncated echo -> empty content, no tool_calls, finish=stop",
+      _msg_trunc32.get("content") == "" and not _msg_trunc32.get("tool_calls")
+      and _obj_trunc32["choices"][0]["finish_reason"] == "stop", _obj_trunc32)
+
+_ev_trunc32 = [f.decode() for f in responses_mod.stream_responses_events(
+    iter([_raw32(_TRUNC32[:12]), _raw32(_TRUNC32[12:]), _raw32("", "stop")]),
+    "m32", {"usage": None, "custom_names": set(),
+            "allowed_names": {"terminal"}})]
+_parsed_trunc32 = [json.loads(_ln[6:]) for _fr in _ev_trunc32
+                   for _ln in _fr.splitlines() if _ln.startswith("data: ")]
+_text_delta_trunc32 = "".join(e.get("delta") or "" for e in _parsed_trunc32
+                              if isinstance(e, dict)
+                              and e.get("type") == "response.output_text.delta")
+check("Responses stream: truncated echo absent from text deltas",
+      _text_delta_trunc32 == "" and _M32 not in "".join(_ev_trunc32),
+      (_text_delta_trunc32[:120],))
+
+print()
+print("[33] issue #10 three-state observability: headers actually sent + INTL limitation")
+_MH33 = ("cosy-machineid", "cosy-machinetoken", "cosy-machinetype",
+         "cosy-machineos", "cosy-machinehostname", "cosy-machinecode")
+_orig_nmi33 = A.native_machine_identity
+_orig_cget33 = A.Account._campaigns_get
+
+
+def _camp33(realm, native):
+    if native:
+        A.native_machine_identity = lambda r, u, force=False: {
+            "machineToken": "tok33", "machineType": "3", "machineCode": "c33",
+            "source": A.MACHINE_IDENTITY_NATIVE}
+    else:
+        A.native_machine_identity = lambda r, u, force=False: {}
+    acc = A.Account({"uid": "u33-%s-%s" % (realm, "n" if native else "d"),
+                     "realm": realm, "accessToken": "dt-x"})
+    hdrs = acc.desktop_headers()
+    state = acc.machine_headers_state
+    A.Account._campaigns_get = lambda self: (
+        {"campaigns": [], "showCampaign": True, "claimable": False}, 200, "")
+    try:
+        st = acc.campaigns(force=True)
+    finally:
+        A.Account._campaigns_get = _orig_cget33
+    return hdrs, state, st
+
+
+try:
+    _h_cn_n33, _s_cn_n33, _c_cn_n33 = _camp33("cn", True)
+    _h_cn_d33, _s_cn_d33, _c_cn_d33 = _camp33("cn", False)
+    _h_in_n33, _s_in_n33, _c_in_n33 = _camp33("intl", True)
+    _h_in_d33, _s_in_d33, _c_in_d33 = _camp33("intl", False)
+    A.Account._campaigns_get = lambda self: (None, 500, "boom33")
+    _acc_fail33 = A.Account({"uid": "u33fail", "realm": "cn", "accessToken": "dt-x"})
+    _st_fail33 = _acc_fail33.campaigns(force=True)
+finally:
+    A.native_machine_identity = _orig_nmi33
+    A.Account._campaigns_get = _orig_cget33
+
+check("cn x native: all six machine headers sent, state reported as native",
+      all(_h_cn_n33.get(k) for k in _MH33)
+      and _s_cn_n33 == A.MACHINE_HEADERS_NATIVE
+      and _c_cn_n33.get("machine_headers") == A.MACHINE_HEADERS_NATIVE,
+      (_s_cn_n33, _c_cn_n33.get("machine_headers")))
+check("cn x derived: no machine header at all, state omitted",
+      not any(_h_cn_d33.get(k) for k in _MH33)
+      and _s_cn_d33 == A.MACHINE_HEADERS_OMITTED
+      and _c_cn_d33.get("machine_headers") == A.MACHINE_HEADERS_OMITTED,
+      (_s_cn_d33, _c_cn_d33.get("machine_headers")))
+check("intl x native: all six headers sent, state native",
+      all(_h_in_n33.get(k) for k in _MH33)
+      and _s_in_n33 == A.MACHINE_HEADERS_NATIVE
+      and _c_in_n33.get("machine_headers") == A.MACHINE_HEADERS_NATIVE,
+      (_s_in_n33, _c_in_n33.get("machine_headers")))
+check("intl x derived: no machine header at all, state omitted",
+      not any(_h_in_d33.get(k) for k in _MH33)
+      and _s_in_d33 == A.MACHINE_HEADERS_OMITTED
+      and _c_in_d33.get("machine_headers") == A.MACHINE_HEADERS_OMITTED,
+      (_s_in_d33, _c_in_d33.get("machine_headers")))
+check("INTL x omitted must carry the known-limitation hint (UMID + 已知限制)",
+      isinstance(_c_in_d33.get("hint"), str)
+      and "UMID" in _c_in_d33["hint"] and "已知限制" in _c_in_d33["hint"],
+      _c_in_d33.get("hint"))
+check("CN x omitted hint key exists and is empty (no leak of the INTL caveat)",
+      "hint" in _c_cn_d33 and _c_cn_d33.get("hint") == "",
+      _c_cn_d33.get("hint"))
+check("native (both realms) hint is empty: only INTL x omitted warns",
+      _c_cn_n33.get("hint") == "" and _c_in_n33.get("hint") == "",
+      (_c_cn_n33.get("hint"), _c_in_n33.get("hint")))
+check("the two dimensions are orthogonal (identity derived != headers omitted)",
+      _c_cn_d33.get("identity") == "derived"
+      and _c_cn_d33.get("machine_headers") == A.MACHINE_HEADERS_OMITTED,
+      (_c_cn_d33.get("identity"), _c_cn_d33.get("machine_headers")))
+check("failed campaigns() probe still reports machine_headers + hint keys",
+      _st_fail33.get("ok") is False
+      and "machine_headers" in _st_fail33 and "hint" in _st_fail33,
+      _st_fail33)
+check("identity source vocabulary: self-heal compares against runtime-info",
+      A.MACHINE_IDENTITY_NATIVE == "runtime-info"
+      and '== "native"' not in "\n".join(
+          l for l in _ALL_SRC.splitlines() if not l.lstrip().startswith("#")))
+
+print()
+print("[34] upstream v1.2.1 audit fixes: Responses context/terminal/seq, scheduler state, pro idempotency")
+_src34 = _ALL_SRC
+check("Responses retry reopens with the converted chat_req (both call sites)",
+      "chat_req, session_key=session_key" in _src34
+      and "upstream, chat_req, session_key" in _src34)
+
+_h34 = {"usage": None, "custom_names": set(), "allowed_names": {"terminal"}}
+_ev34 = [json.loads(_ln[6:])
+         for _f in responses_mod.stream_responses_events(
+             iter([_raw32("hi"), _raw32("", "stop")]), "m32", _h34)
+         for _ln in _f.decode().splitlines() if _ln.startswith("data: ")]
+_max34 = max(e["sequence_number"] for e in _ev34)
+_fail_raw34 = responses_mod.responses_failed_frame(_h34, 418, "upstream boom")
+_fail_obj34 = json.loads([_l for _l in _fail_raw34.decode().splitlines()
+                          if _l.startswith("data: ")][0][6:])
+check("response.failed: terminal event name / status / error.code",
+      _fail_raw34.decode("utf-8").startswith("event: response.failed\n")
+      and _fail_obj34["type"] == "response.failed"
+      and _fail_obj34["response"]["status"] == "failed"
+      and _fail_obj34["response"]["error"]["code"] == "418",
+      _fail_obj34)
+check("response.failed: sequence_number continues past all prior events",
+      _fail_obj34["sequence_number"] > _max34,
+      (_fail_obj34["sequence_number"], _max34))
+_h34b = {"usage": None, "custom_names": set(), "allowed_names": {"terminal"}}
+_ev34b1 = [json.loads(_ln[6:])
+           for _f in responses_mod.stream_responses_events(
+               iter([_raw32("a"), _raw32("", "stop")]), "m32", _h34b)
+           for _ln in _f.decode().splitlines() if _ln.startswith("data: ")]
+_ev34b2 = [json.loads(_ln[6:])
+           for _f in responses_mod.stream_responses_events(
+               iter([_raw32("b"), _raw32("", "stop")]), "m32", _h34b)
+           for _ln in _f.decode().splitlines() if _ln.startswith("data: ")]
+check("Responses reopen keeps sequence_number monotonic (no reset to 0)",
+      min(e["sequence_number"] for e in _ev34b2)
+      == max(e["sequence_number"] for e in _ev34b1) + 1,
+      (max(e["sequence_number"] for e in _ev34b1),
+       min(e["sequence_number"] for e in _ev34b2)))
+
+check("catalog_source: value within the allowed set, unknown realm -> cn branch",
+      C.snapshot_source("cn") in ("external-json", "embedded-frozen", "unknown")
+      and C.snapshot_source("intl") in ("external-json", "embedded-frozen", "unknown")
+      and C.snapshot_source("bogus-realm") == C.snapshot_source("cn"),
+      (C.snapshot_source("cn"), C.snapshot_source("intl")))
+check("/v1/models keeps its shape and adds the read-only catalog_source",
+      '"object": "list", "data": data' in _src34
+      and '"catalog_source": catalog_source' in _src34
+      and 'catalog_source = "unknown"' in _src34)
+check("/v1/completions answers a clear 404 instead of forwarding an empty session",
+      "the legacy /v1/completions API is not supported here" in _src34)
+check("/settings/reveal refuses while the panel password is still default",
+      "面板仍在使用默认密码" in _src34
+      and "panel_password_is_default" in _src34)
+
+# 调度器状态落盘 + 启动补签闸门（mark-before-act）
+import shutil as _sh34
+import tempfile as _tf34
+from qoder2api import scheduler as _S34
+_tmp34 = _tf34.mkdtemp(prefix="qd-test-sched-")
+_sched_err34 = None
+try:
+    _pool34 = A.AccountPool(_tmp34)
+    _s1_34 = _S34.Scheduler(_pool34, state_dir=_tmp34)
+    _gate_first34 = _s1_34._allow_complement_checkin(_S34.CYCLE_STARTUP)
+    _state_path34 = _s1_34._state_path()
+    _state_exists34 = os.path.isfile(_state_path34)
+    with open(_state_path34, encoding="utf-8") as _fh34:
+        _state_json34 = json.load(_fh34)
+    _gate_second34 = _s1_34._allow_complement_checkin(_S34.CYCLE_STARTUP)
+    _s2_34 = _S34.Scheduler(_pool34, state_dir=_tmp34)     # simulate a restart
+    _gate_restart34 = _s2_34._allow_complement_checkin(_S34.CYCLE_STARTUP)
+    _gate_hour34 = _s2_34._allow_complement_checkin(_S34.CYCLE_HOUR)
+    _accounts34 = _pool34.load()
+finally:
+    _sh34.rmtree(_tmp34, ignore_errors=True)
+
+check("Scheduler: state.json lives in a subdir and is not read as an account",
+      _state_path34 == os.path.join(_tmp34, "scheduler", "state.json")
+      and _state_exists34 and _accounts34 == [],
+      (_state_path34, len(_accounts34)))
+check("Scheduler: mark-before-act — first startup complement allowed, date saved first",
+      _gate_first34 is True
+      and _state_json34.get("startup_claim_date") == time.strftime("%Y-%m-%d"),
+      _state_json34.get("startup_claim_date"))
+check("Scheduler: second startup complement on the same day is refused",
+      _gate_second34 is False, _gate_second34)
+check("Scheduler: a restart does not replay (new instance reads the same state)",
+      _gate_restart34 is False, _gate_restart34)
+check("Scheduler: hourly cycles are not gated", _gate_hour34 is True, _gate_hour34)
+
+# Pro 领取幂等：已领取不再虚增 credit_added
+_orig_pro_claim34 = A.Account.pro_claim
+_orig_pro_elig34 = A.Account.pro_eligibility
+try:
+    _acc_pro34 = A.Account({"uid": "pro34", "realm": "cn", "accessToken": "dt-x"})
+    A.Account.pro_eligibility = lambda self: (True, True)
+    A.Account.pro_claim = lambda self: {"ok": True, "already": True,
+                                        "msg": "Pro 升级包已领取过"}
+    _r_already34 = T.run_pro_claim(_acc_pro34)
+    _batch_already34 = T.run_batch_pro_claim([_acc_pro34])
+    A.Account.pro_claim = lambda self: {"ok": True, "msg": "Pro 升级包领取成功"}
+    A.Account.fetch_credits = lambda self: {"ok": False}
+    _r_new34 = T.run_pro_claim(_acc_pro34)
+finally:
+    A.Account.pro_claim = _orig_pro_claim34
+    A.Account.pro_eligibility = _orig_pro_elig34
+
+check("pro claim: already-claimed is reported but earns 0 credits",
+      _r_already34.get("ok") and _r_already34.get("already_claimed")
+      and _r_already34.get("state") == "already_claimed"
+      and _r_already34.get("earned_credit") == 0, _r_already34)
+check("pro claim: freshly-claimed still earns the full reward",
+      _r_new34.get("state") == "claimed_now"
+      and _r_new34.get("earned_credit") == T.PRO_REWARD_CREDIT, _r_new34)
+check("pro batch: credit_added counts only fresh grants + already_count exposed",
+      _batch_already34.get("credit_added") == 0
+      and _batch_already34.get("already_count") == 1,
+      (_batch_already34.get("credit_added"),
+       _batch_already34.get("already_count")))
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

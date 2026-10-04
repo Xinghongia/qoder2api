@@ -18,7 +18,7 @@ from .reasoning import (available_context_windows, client_thinking,
                         effort_from_budget, normalize_reasoning_effort,
                         resolve_context_window, supported_efforts)
 from .chat_normalize import (is_deepseek_model,
-                              backfill_reasoning_content)
+                              backfill_reasoning_content, LEAK_MARKER)
 from .sanitize import (sanitize_text, sanitize_messages,
                        normalize_roles)
 
@@ -112,7 +112,7 @@ def flatten_messages(messages, keep_reasoning=False):
                 calls.append({"name": fn.get("name") or "",
                               "arguments": fn.get("arguments") or ""})
             if calls:
-                text = (text or "") + "\n\n[assistant 请求调用工具]\n" + \
+                text = (text or "") + "\n\n" + LEAK_MARKER + "\n" + \
                     json.dumps(calls, ensure_ascii=False)
             item = {"role": "assistant", "content": text or ""}
             if keep_reasoning and m.get("reasoning_content") is not None:

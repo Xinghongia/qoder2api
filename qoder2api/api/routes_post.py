@@ -13,7 +13,9 @@ from .. import upstream as upstream_mod
 from ..affinity import prompt_fingerprint
 from ..usage import record_error, record_usage
 from ..chat_normalize import (normalize_tool_choice, normalize_tools,
-                              translate_max_completion_tokens)
+                              translate_max_completion_tokens,
+                              recover_leaked_tool_calls,
+                              tool_names_from_payload)
 from ..upstream import (RateLimited, TRANSIENT_MAX_RETRIES,
                         _handle_envelope_account_cooldown,
                         _to_int_status, aggregate_with_envelope_retry,
@@ -45,8 +47,16 @@ class PostRoutesMixin(object):
         )
         if not is_account_route and path not in (
                 "/v1/chat/completions", "/chat/completions",
-                "/v1/completions", "/completions",
                 "/v1/responses", "/responses"):
+            if path in ("/v1/completions", "/completions"):
+                # legacy Completions（prompt 而非 messages）本网关不实现：
+                # 明确 404 优于"接受请求却按空会话转发上游"。
+                return self._error(
+                    404,
+                    "the legacy /v1/completions API is not supported here: "
+                    "this gateway speaks Chat Completions and Responses. "
+                    "Use /v1/chat/completions with messages=[...] instead.",
+                    "invalid_request_error")
             return self._error(404, "not found", "invalid_request_error")
         if not self._authorized():
             return
@@ -112,7 +122,8 @@ class PostRoutesMixin(object):
             return self._error(502, "upstream unreachable: %s" % exc)
 
         with upstream:
-            holder = {"usage": None}
+            holder = {"usage": None,
+                      "allowed_names": tool_names_from_payload(payload)}
             if want_stream:
                 self._sse_begin()
                 emitted = False
@@ -126,7 +137,9 @@ class PostRoutesMixin(object):
                     while True:
                         try:
                             for line in sse_with_heartbeat(
-                                    iter_inner_sse(cur, holder=holder),
+                                    recover_leaked_tool_calls(
+                                        iter_inner_sse(cur, holder=holder),
+                                        allowed_names=holder.get("allowed_names")),
                                     self._sse_write):
                                 if first_ms is None:
                                     first_ms = int((time.time() - t_start) * 1000)
