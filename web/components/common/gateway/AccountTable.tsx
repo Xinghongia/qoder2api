@@ -87,6 +87,14 @@ export interface AccountRow {
   userType?: string;
   machineId?: string;
   sessionId?: string;
+  /**
+   * 上游活动平台判定的「本轮已领到」——由 /accounts/checkin-state 合并进来。
+   * 本地 lastCheckin 只记录"本网关领过"，账号被官方客户端/另一台网关领走时
+   * 会一直是旧时间戳，必须以上游为准（undefined = 未知，按本地判断）。
+   */
+  roundClaimed?: boolean;
+  /** 上游「本轮」说明（本轮截止 …）——徽标悬停展示。 */
+  roundNote?: string;
 }
 
 interface ActionResult {
@@ -321,7 +329,8 @@ export function AccountTable({
 
   const enabledCount = rows.filter((r) => r.enabled).length;
   const coolingCount = rows.filter((r) => r.enabled && r.inCooldown).length;
-  const checkinCount = rows.filter((r) => r.canCheckin !== false).length;
+  // 「待签到」人数：上游判定的本轮已领（roundClaimed）不算待签
+  const checkinCount = rows.filter((r) => r.roundClaimed !== true && r.canCheckin !== false).length;
 
   return (
     <section className="overflow-hidden rounded-[20px] bg-muted">
@@ -417,7 +426,11 @@ export function AccountTable({
               const state = stateOf(row);
               const checkinBusy = busy === 'all' || busy === row.uid;
               const checkinLocked = checkinBusy || isPending(row.uid, 'checkin');
-              const noCheckinCap = row.checkinCapability === 'not_found';
+              // 本轮状态以上游为准：roundClaimed=true 显示「本轮已签到」；
+              // 未知（undefined）时回落本地 canCheckin 判断。
+              const roundClaimed = row.roundClaimed === true;
+              const needsCheckin =
+                !roundClaimed && row.enabled && row.canCheckin !== false;
               const cred = row.credits || null;
               const exhausted =
                 cred?.exceeded === true ||
@@ -432,12 +445,21 @@ export function AccountTable({
                       <span className="text-sm font-medium">
                         {row.nickname || uid8(row.uid)}
                       </span>
-                      {row.enabled && row.canCheckin !== false && !noCheckinCap && (
+                      {needsCheckin && (
                         <Badge
                           variant="outline"
                           className={cn('rounded-full px-1.5 py-0 text-[10px]', TONE_BADGE.warning)}
                         >
                           待签到
+                        </Badge>
+                      )}
+                      {roundClaimed && (
+                        <Badge
+                          variant="outline"
+                          className={cn('rounded-full px-1.5 py-0 text-[10px]', TONE_BADGE.ok)}
+                          title={row.roundNote || '上游活动平台已领取'}
+                        >
+                          本轮已签到
                         </Badge>
                       )}
                     </div>
@@ -535,14 +557,6 @@ export function AccountTable({
                         最近签到 {row.lastCheckin}
                       </div>
                     )}
-                    {noCheckinCap && (
-                      <div
-                        className="mt-0.5 max-w-[220px] truncate text-[10px] text-muted-foreground"
-                        title={row.checkinReason || '本区域没有签到接口'}
-                      >
-                        本区无签到入口
-                      </div>
-                    )}
                   </TableCell>
 
                   <TableCell className="pr-4 align-top text-right">
@@ -551,12 +565,8 @@ export function AccountTable({
                         variant="ghost"
                         size="sm"
                         className="h-7 rounded-full px-2 text-xs"
-                        disabled={checkinLocked || noCheckinCap}
-                        title={
-                          noCheckinCap
-                            ? row.checkinReason || '本区域没有签到接口'
-                            : '只签到这一个账号，不切换区域'
-                        }
+                        disabled={checkinLocked}
+                        title="只签到这一个账号，不切换区域（已领过会如实回报「本轮已领取」）"
                         onClick={() => checkinOne(row)}
                       >
                         {checkinLocked ? (

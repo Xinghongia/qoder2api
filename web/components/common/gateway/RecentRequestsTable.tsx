@@ -29,6 +29,8 @@ import {cn} from '@/lib/utils';
  *     与旧版一致（total ≤ 7 全列，其余带省略号）；
  *   · 表头 12 列：时间 / 模型 / 账号 / 模式 / 耗时 / 首字 / 速度 / 输入 /
  *     输出 / 思考 / 缓存 / 总 token；失败行在耗时列显示红色「失败」徽章；
+ *     `showCredit` 时在末尾追加第 13 列「积分」（每次请求实际消耗，上游
+ *     usage.credits）——用量页看全量账单，仪表盘预览保持 12 列；
  *   · 切换区域回到第 1 页并重拉；加载失败只提示、不清空已展示的数据。
  */
 
@@ -42,6 +44,8 @@ interface RecentRow {
   iso?: string;
   model?: string;
   account?: string;
+  /** 账号昵称（后端按 uid 现查账号池；账号已删时为空 -> 回落 uid 前缀）。 */
+  account_name?: string;
   stream?: boolean;
   error?: boolean;
   status?: number;
@@ -56,6 +60,8 @@ interface RecentRow {
   cached_tokens?: number;
   cache_hit_pct?: number | null;
   total_tokens?: number;
+  /** 本次请求实际消耗积分（上游 usage.credits；免费模型/失败行为 0/缺失）。 */
+  credit?: number;
   realm?: string;
 }
 
@@ -70,6 +76,13 @@ interface RecentPayload {
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString('en-US');
+
+/** 积分：上游 credits 是小数（如 0.0192），0 直接写 0，非零最多保留 4 位。 */
+const fmtCredit = (n: number | null | undefined) => {
+  const v = n ?? 0;
+  if (!Number.isFinite(v) || v === 0) return '0';
+  return v.toFixed(4).replace(/\.?0+$/, '');
+};
 
 const TONE = {
   danger: 'border-red-500/35 bg-red-500/10 text-red-700 dark:text-red-400',
@@ -104,12 +117,20 @@ export function RecentRequestsTable({
   realm,
   title = '最近请求',
   hint,
+  from,
+  to,
+  showCredit = false,
 }: {
   realm: Realm;
   /** 卡片标题：仪表盘用默认「最近请求」；用量页用「全部请求记录」。 */
   title?: string;
-  /** 标题旁的小字说明（如「全部历史，可翻页」）。 */
+  /** 标题旁的小字说明（如「仅显示最新 100 条」）。 */
   hint?: string;
+  /** 本地日期范围（YYYY-MM-DD，含两端）；不传 = 不限时间。 */
+  from?: string;
+  to?: string;
+  /** 末尾追加「积分」列（用量页的全量账单视图用；仪表盘预览不显示）。 */
+  showCredit?: boolean;
 }) {
   // limit 为 null 表示「本地偏好还没读出来」：先不发请求，读出来后只发一次。
   const [limit, setLimit] = React.useState<number | null>(null);
@@ -131,10 +152,12 @@ export function RecentRequestsTable({
     setLimit(value);
   }, []);
 
-  // 区域切换回到第 1 页：渲染期同步校正，避免先用旧页码对新区域发一次请求。
-  const [pageRealm, setPageRealm] = React.useState(realm);
-  if (pageRealm !== realm) {
-    setPageRealm(realm);
+  // 区域 / 时间范围切换回到第 1 页：渲染期同步校正，避免先用旧页码对新
+  // 筛选条件发一次请求（用量页的日期选择一变，页码必须跟着归零）。
+  const rangeKey = `${realm}|${from || ''}|${to || ''}`;
+  const [pageKey, setPageKey] = React.useState(rangeKey);
+  if (pageKey !== rangeKey) {
+    setPageKey(rangeKey);
     setPage(1);
   }
 
@@ -142,7 +165,7 @@ export function RecentRequestsTable({
     if (limit === null) return;
     setLoading(true);
     try {
-      const r = (await api.usage.recent(limit, page, realm)) as RecentPayload;
+      const r = (await api.usage.recent(limit, page, realm, from, to)) as RecentPayload;
       const nextTotal = r?.total || 0;
       const nextTotalPages =
         r?.total_pages || Math.max(1, Math.ceil(nextTotal / limit));
@@ -157,7 +180,7 @@ export function RecentRequestsTable({
     } finally {
       setLoading(false);
     }
-  }, [limit, page, realm]);
+  }, [limit, page, realm, from, to]);
 
   useAuthedLoad(() => {
     void load();
@@ -180,6 +203,7 @@ export function RecentRequestsTable({
   };
 
   const showSkeleton = loading && rows.length === 0;
+  const columns = showCredit ? COLUMN_COUNT + 1 : COLUMN_COUNT;
 
   return (
     <section className="overflow-hidden rounded-[20px] bg-muted">
@@ -245,16 +269,26 @@ export function RecentRequestsTable({
             <TableHead className="text-[11px] font-normal text-muted-foreground">
               缓存
             </TableHead>
-            <TableHead className="pr-4 text-[11px] font-normal text-muted-foreground">
+            <TableHead
+              className={cn(
+                'text-[11px] font-normal text-muted-foreground',
+                !showCredit && 'pr-4',
+              )}
+            >
               总 token
             </TableHead>
+            {showCredit && (
+              <TableHead className="pr-4 text-[11px] font-normal text-muted-foreground">
+                积分
+              </TableHead>
+            )}
           </TableRow>
         </TableHeader>
         <TableBody>
           {showSkeleton ? (
             Array.from({length: 5}).map((_, i) => (
               <TableRow key={i} className="border-b border-border/40 hover:bg-transparent">
-                <TableCell colSpan={COLUMN_COUNT} className="pl-4">
+                <TableCell colSpan={columns} className="pl-4">
                   <Skeleton className="h-5 w-full" />
                 </TableCell>
               </TableRow>
@@ -262,7 +296,7 @@ export function RecentRequestsTable({
           ) : rows.length === 0 ? (
             <TableRow className="border-0 hover:bg-transparent">
               <TableCell
-                colSpan={COLUMN_COUNT}
+                colSpan={columns}
                 className="py-10 text-center text-xs text-muted-foreground"
               >
                 还没有请求记录
@@ -277,8 +311,12 @@ export function RecentRequestsTable({
                     {(r.iso || '').replace('T', ' ').slice(5)}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{r.model || '—'}</TableCell>
-                  <TableCell className="font-mono text-[11px] text-muted-foreground">
-                    {(r.account || '—').slice(0, 8)}
+                  {/* 账号显示昵称（如 aliyun3780958258），比 uid 前缀好认；
+                      账号已删时后端拿不到名字，回落 uid 前缀。 */}
+                  <TableCell className="text-[11px] text-muted-foreground">
+                    <span title={r.account || ''}>
+                      {r.account_name || (r.account || '—').slice(0, 8)}
+                    </span>
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -316,9 +354,26 @@ export function RecentRequestsTable({
                   <TableCell className="tabular-nums">
                     {r.cache_hit_pct != null ? `${r.cache_hit_pct}%` : '—'}
                   </TableCell>
-                  <TableCell className="pr-4 tabular-nums">
+                  <TableCell className={cn('tabular-nums', !showCredit && 'pr-4')}>
                     <b>{fmt(r.total_tokens)}</b>
                   </TableCell>
+                  {showCredit && (
+                    <TableCell className="pr-4 tabular-nums">
+                      {r.error ? (
+                        '—'
+                      ) : (
+                        <span
+                          className={cn(
+                            (r.credit ?? 0) > 0
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-muted-foreground',
+                          )}
+                        >
+                          {fmtCredit(r.credit)}
+                        </span>
+                      )}
+                    </TableCell>
+                  )}
                 </TableRow>
               );
             })

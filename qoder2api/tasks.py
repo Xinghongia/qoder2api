@@ -533,6 +533,62 @@ def _campaign_state_cn(status, reason, achievement_ok, action_type=""):
     return "ineligible"
 
 
+def checkin_round_states(pool, realm=None):
+    """每个账号「本轮」的签到状态（账号表徽标用）。
+
+    判据以**活动平台**为准（campaigns() 自带 20s 缓存、并行取回）：
+    本地 lastCheckin 只记录"本网关领过"，而账号可能被官方客户端或另一台网关
+    领走（同一批账号多处使用）——只信本地会一直显示"待签到"。
+
+    返回 {uid: {"claimed": bool, "claimable": bool, "round_note": str}}；
+    拿不到活动状态（查询失败）时该账号不出现在结果里，前端按"未知"处理。
+    """
+    accounts = [a for a in (pool.accounts if pool else [])
+                if a.enabled and a.access_token]
+    if realm in ("cn", "intl"):
+        accounts = [a for a in accounts if a.realm == realm]
+    states = {}
+    if not accounts:
+        return states
+
+    def _fetch(acc):
+        try:
+            return acc.campaigns()
+        except Exception:
+            return {"ok": False}
+
+    results = {}
+    if len(accounts) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(6, len(accounts))) as ex:
+            futs = {acc.uid: ex.submit(_fetch, acc) for acc in accounts}
+            for acc in accounts:
+                try:
+                    results[acc.uid] = futs[acc.uid].result()
+                except Exception:
+                    results[acc.uid] = {"ok": False}
+    else:
+        results[accounts[0].uid] = _fetch(accounts[0])
+
+    for acc in accounts:
+        st = results.get(acc.uid) or {}
+        if not st.get("ok"):
+            continue
+        daily = [c for c in st.get("campaigns") or []
+                 if str(c.get("action_type") or "") in ("", "CLAIM_BENEFIT")
+                 and str((c.get("benefit") or {}).get("kind") or "").upper()
+                 in ("", "CREDITS")]
+        claimed = [c for c in daily if c.get("claim_status") == "CLAIMED"]
+        claimable = [c for c in daily if c.get("claim_status") == "CLAIMABLE"]
+        states[acc.uid] = {
+            "uid": acc.uid,
+            "claimed": bool(claimed),
+            "claimable": bool(claimable),
+            "round_note": qoder_accounts.round_note(claimed or claimable),
+        }
+    return states
+
+
 def aggregate_campaign_rows(accounts, gap=0.0):
     """uid=all：把全部账号的活动**按活动聚合成行**，并给出每账号资格明细。
 

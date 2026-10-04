@@ -173,17 +173,24 @@ class GetRoutesMixin(object):
                 page = 1
             req_realm = query.get("realm", [None])[0] \
                 or self.headers.get("X-Realm") or runtime.CURRENT_REALM
+            # 本地日期范围（含两端，YYYY-MM-DD）：用量页「全部请求记录」跟随
+            # 日期选择走；仪表盘不传 = 不限时间（最近 N 条）。
+            from_day = (query.get("from") or [""])[0]
+            to_day = (query.get("to") or [""])[0]
             # 总条数优先用 SQLite 聚合库（SUM(requests)）——逐行扫描整份 JSONL
             # 在几十万行时会明显拖慢翻页；统计库不可用时回退旧的全扫口径。
             try:
                 from .. import usagedb
-                total = usagedb.count_requests(req_realm)
+                total = usagedb.count_requests(req_realm, from_day or None,
+                                               to_day or None)
             except Exception as exc:
                 log("recent total via usagedb failed, scanning jsonl: %s" % exc,
                     level="WARN")
                 total = None
             return self._json(200, recent_usage(limit, realm=req_realm, page=page,
-                                                total=total))
+                                                total=total,
+                                                from_day=from_day or None,
+                                                to_day=to_day or None))
         if path == "/usage/stats":
             # 用量统计页（/usage）：SQLite 聚合库 + 任意时间范围/模型/密钥维度。
             # range=today|7d|30d|custom（custom 需 from/to=YYYY-MM-DD）；
@@ -237,6 +244,23 @@ class GetRoutesMixin(object):
                 "storage": runtime.ACCOUNTS_DIR,
                 "usable": runtime.POOL.count_ready() if runtime.POOL else 0,
             })
+        if path == "/accounts/checkin-state":
+            # 账号行「本轮已签到」徽标的判据：以活动平台为准（本地 lastCheckin
+            # 只记录"本网关领过"，账号可能被官方客户端/另一台网关领走）。
+            # 单独成端点而不是塞进 /accounts：campaigns() 有 1-4 秒的上游耗时
+            # （20s 缓存 + 并行），不能让账号表首屏等它。
+            if not self._authorized():
+                return
+            req_realm = (query.get("realm", [None])[0]
+                         or self.headers.get("X-Realm") or "").strip().lower()
+            if req_realm not in ("cn", "intl"):
+                req_realm = None
+            try:
+                states = qoder_tasks.checkin_round_states(runtime.POOL, req_realm)
+            except Exception as exc:
+                log("checkin-state failed: %s" % exc, level="WARN")
+                states = {}
+            return self._json(200, {"accounts": list(states.values())})
         if path == "/accounts/export":
             if not self._authorized():
                 return
@@ -307,7 +331,6 @@ class GetRoutesMixin(object):
         if path == "/tasks":
             if not self._authorized():
                 return
-            from qoder2api import tasks as qoder_tasks
             uid = (query.get("uid") or [None])[0]
             view = qoder_tasks.fetch_tasks_view(runtime.POOL, uid=uid)
             if view.get("msg") and not view.get("tasks"):

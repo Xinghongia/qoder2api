@@ -9,5 +9,5 @@
     cli                              入口
 """
 
-__version__ = "1.2.7"
+__version__ = "1.2.8"
 VERSION = __version__

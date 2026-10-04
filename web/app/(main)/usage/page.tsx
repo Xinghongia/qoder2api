@@ -53,8 +53,13 @@ const RANGE_OPTIONS: {value: UsageRangeKey; label: string}[] = [
 ];
 const AUTO_REFRESH_MS = 60_000;
 
+/** 本地日期（非 UTC）：toISOString() 按 UTC 切天，东八区凌晨会算成前一天。 */
+const localDay = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
 const isoDay = (offsetDays = 0) =>
-  new Date(Date.now() + offsetDays * 86_400_000).toISOString().slice(0, 10);
+  localDay(new Date(Date.now() + offsetDays * 86_400_000));
 const clockNow = () => new Date().toLocaleTimeString('zh-CN', {hour12: false});
 
 export default function UsagePage() {
@@ -152,6 +157,15 @@ export default function UsagePage() {
 
   const avgPerRequest = s && s.requests > 0 ? Math.round(s.total_tokens / s.requests) : 0;
   const customInvalid = rangeKey === 'custom' && from > to;
+  // 「全部请求记录」跟随上面的时间范围：把快捷范围换算成具体的起止本地日期
+  // （与后端 range=today|7d|30d 的切天口径一致：今天 = 今天 00:00 起）。
+  const logRange = React.useMemo(() => {
+    if (customInvalid) return {from: undefined, to: undefined};
+    if (rangeKey === 'custom') return {from, to};
+    if (rangeKey === 'today') return {from: isoDay(0), to: isoDay(0)};
+    if (rangeKey === '7d') return {from: isoDay(-6), to: isoDay(0)};
+    return {from: isoDay(-29), to: isoDay(0)};
+  }, [rangeKey, from, to, customInvalid]);
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -291,8 +305,15 @@ export default function UsagePage() {
         />
       </div>
 
-      {/* 全量请求记录：仪表盘的「最近请求」只是最近 100 条的预览。 */}
-      <RecentRequestsTable realm={view} title="全部请求记录" hint="全部历史" />
+      {/* 全量请求记录：跟随上方时间范围（服务端分页，可翻到底）。
+          showCredit = 末尾「积分」列，看每次请求实际烧了多少积分。 */}
+      <RecentRequestsTable
+        realm={view}
+        title="全部请求记录"
+        from={logRange.from}
+        to={logRange.to}
+        showCredit
+      />
     </div>
   );
 }

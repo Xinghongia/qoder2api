@@ -32,7 +32,7 @@ export interface UsageKeyRow extends UsageSummary {
 export interface UsageSeries {
   /** 稳定键：模型名 / Key id / total（图例与 React key 用它）。 */
   name: string;
-  /** 展示名：Key 显示名字、未绑定时为「未绑定 Key」。 */
+  /** 展示名：真实密钥用名字；空桶/旧版桶用「未使用密钥」/「旧版数据（升级前）」。 */
   title: string;
   requests: number[];
   tokens: number[];
@@ -62,10 +62,14 @@ export interface UsageStats {
   trend: UsageTrend;
 }
 
-/** Key 展示名：没有 key_name（历史行/未绑定）时给一个可读的兜底。 */
+/**
+ * Key 展示名：后端已把两个特殊聚合桶翻译成中文标签
+ * （「未使用密钥」= 有 key_id 字段但为空；「旧版数据（升级前）」= v1.2.7 之前
+ * 没有密钥维度的历史行），这里只做兜底。
+ */
 export function keyTitle(row: {key_id?: string; key_name?: string}): string {
   if (row.key_name) return row.key_name;
-  return row.key_id ? row.key_id : '未绑定 Key';
+  return row.key_id ? row.key_id : '未使用密钥';
 }
 
 /** 紧凑数字（坐标轴刻度 / 图例小字）：1234 → 1.2k，1.2e6 → 1.2M。 */

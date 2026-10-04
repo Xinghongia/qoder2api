@@ -691,9 +691,6 @@ def sse_with_heartbeat(source, send, interval=None, idle_limit=None):
     if idle_limit is None:
         idle_limit = 900.0
 
-    import queue as _queue
-    import threading as _threading
-
     box = _queue.Queue()
     done = object()
 

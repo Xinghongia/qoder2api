@@ -268,6 +268,72 @@ check("status 暴露库路径 / offset / 聚合行数",
       and _status["jsonl_offset"] == _status["jsonl_size"]
       and _status["hourly_rows"] >= 1, _status)
 
+print()
+print("[5] 密钥三态（真实 / 未使用 / 旧版数据）+ 范围计数")
+_reset()
+_legacy = {"at": _NOW - 3600, "model": "auto", "total_tokens": 500,
+           "prompt_tokens": 400, "completion_tokens": 100, "cached_tokens": 0,
+           "credit": 1.0, "realm": "intl"}          # 无 key_id 字段 = 旧版行
+_nokey = dict(_legacy, total_tokens=300, key_id="", key_name="")   # 有字段但为空
+_keyed = dict(_legacy, total_tokens=200, key_id="k0", key_name="主 Key")
+_write([_legacy, _nokey, _keyed])
+usagedb.sync()
+st5 = usagedb.stats(_TODAY, _TODAY, realm="intl", group="key_id")
+_by5 = {r["key_id"]: r for r in st5["by_key"]}
+check("无 key_id 字段的历史行 -> LEGACY 哨兵桶，不混进「未使用密钥」",
+      usagedb.LEGACY_KEY_ID in _by5 and "" in _by5
+      and _by5[usagedb.LEGACY_KEY_ID]["total_tokens"] == 500
+      and _by5[""]["total_tokens"] == 300, list(_by5))
+check("两个哨兵桶的展示名分别是「旧版数据（升级前）」与「未使用密钥」",
+      _by5[usagedb.LEGACY_KEY_ID]["key_name"] == "旧版数据（升级前）"
+      and _by5[""]["key_name"] == "未使用密钥"
+      and _by5["k0"]["key_name"] == "主 Key",
+      [r["key_name"] for r in st5["by_key"]])
+check("哨兵桶带 is_placeholder 标记（真实密钥没有）",
+      _by5[usagedb.LEGACY_KEY_ID].get("is_placeholder") is True
+      and _by5[""].get("is_placeholder") is True
+      and not _by5["k0"].get("is_placeholder"))
+_titles5 = {s["name"]: s["title"] for s in st5["trend"]["series"]}
+check("趋势序列标题同口径（旧版/未使用分列，不再都写「未绑定 Key」）",
+      _titles5.get(usagedb.LEGACY_KEY_ID) == "旧版数据（升级前）"
+      and _titles5.get("") == "未使用密钥" and _titles5.get("k0") == "主 Key",
+      _titles5)
+check("count_requests 支持时间范围（用量页请求表跟随日期选择）",
+      usagedb.count_requests("intl", _TODAY, _TODAY) == 3
+      and usagedb.count_requests("intl", _DAY(-1), _DAY(-1)) == 0
+      and usagedb.count_requests("", _TODAY, _TODAY) == 3,
+      (usagedb.count_requests("intl", _TODAY, _TODAY),
+       usagedb.count_requests("intl", _DAY(-1), _DAY(-1))))
+check("口径版本升级会清空聚合表按新口径重放（v1 -> v2）",
+      usagedb.SCHEMA_VERSION == "2")
+
+# 真跑一遍 v1 -> v2 迁移：把库伪装成 v1（有旧聚合行 + 已前移的 offset），
+# 重连后应清空聚合表、重置 offset，再由下次 stats() 全量重放出正确口径。
+_reset()
+_write([_legacy, _nokey, _keyed])
+usagedb.sync()
+_db = os.path.join(_TMP, "usage.db")
+if usagedb._CONN is not None:
+    usagedb._CONN.close()
+usagedb._CONN = None
+usagedb._SCHEMA_READY = False
+import sqlite3 as _sq
+_c = _sq.connect(_db)
+_c.execute("UPDATE meta SET v = '1' WHERE k = 'schema_version'")
+_c.commit()
+_c.close()
+usagedb._CONN = None
+usagedb._SCHEMA_READY = False
+_st_off = usagedb.status()          # 重连即触发迁移：清表 + 重置 offset
+_st_mig = usagedb.stats(_TODAY, _TODAY, realm="intl", group="key_id")
+_mig_keys = {r["key_id"] for r in _st_mig["by_key"]}
+check("v1 库升级到 v2 时清空聚合表并把导入位置归零（下次 sync 全量重放）",
+      _st_off["hourly_rows"] == 0 and _st_off["daily_rows"] == 0,
+      _st_off)
+check("全量重放后旧版行重新归入 LEGACY 桶、口径不变",
+      usagedb.LEGACY_KEY_ID in _mig_keys and "" in _mig_keys
+      and _st_mig["summary"]["requests"] == 3, _mig_keys)
+
 shutil.rmtree(_TMP, ignore_errors=True)
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

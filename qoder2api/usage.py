@@ -76,7 +76,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None,
 
     key：本次请求所用的 API Key 条目（api/base.py 的 key_entry）。有值时把
     key_id/key_name 写进行内——用量统计的「按密钥维度」全靠它；面板会话或
-    未开启鉴权时为空（统计里显示为「未绑定 Key」）。
+    未开启鉴权时写空值（统计里显示为「未使用密钥」；**没有这个字段的历史行**
+    则显示为「旧版数据（升级前）」，见 usagedb 的 LEGACY_KEY_ID）。
     """
     fields = _extract_usage(usage)
     if not fields:
@@ -526,17 +527,41 @@ def _tail_lines(path, max_lines, chunk=256 * 1024):
     return lines
 
 
-def count_usage_rows(realm=None):
-    """Cheap row count - substring match instead of a full JSON parse."""
+def count_usage_rows(realm=None, from_day=None, to_day=None):
+    """Cheap row count - substring match instead of a full JSON parse.
+
+    传了 from_day/to_day（本地日期，含两端）时按行内 `at` 过滤：需要解析
+    JSON，代价比子串匹配高，但只在统计库不可用的回退路径上出现。
+    """
     needles = ()
     if realm:
         needles = ('"realm": "%s"' % realm, '"realm":"%s"' % realm)
+    start_ts, end_ts = _day_bounds(from_day, to_day) if (from_day or to_day) \
+        else (None, None)
+    ranged = start_ts is not None or end_ts is not None
+
+    def in_range(item):
+        at = item.get("at")
+        if not isinstance(at, (int, float)):
+            return False
+        if start_ts is not None and at < start_ts:
+            return False
+        if end_ts is not None and at >= end_ts:
+            return False
+        return True
+
     n = 0
     try:
         with open(runtime.USAGE_LOG, encoding="utf-8") as fh:
             for line in fh:
                 if not line.strip():
                     continue
+                if ranged:
+                    try:
+                        if not in_range(json.loads(line)):
+                            continue
+                    except Exception:
+                        continue
                 if not needles:
                     n += 1
                     continue
@@ -557,12 +582,35 @@ def count_usage_rows(realm=None):
     return n
 
 
-def recent_usage(limit=100, realm=None, page=1, total=None):
+def _day_bounds(from_day, to_day):
+    """把本地日期（YYYY-MM-DD）换算成 [start_ts, end_ts) 的 epoch 秒区间。
+
+    用量页「全部请求记录」跟随日期选择走；缺失/非法值返回 (None, None) =
+    不限制时间（仪表盘「最近请求」的旧行为）。
+    """
+    start = end = None
+    try:
+        if from_day:
+            t = time.strptime(from_day, "%Y-%m-%d")
+            start = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
+                                 0, 0, 0, 0, 0, -1))
+        if to_day:
+            t = time.strptime(to_day, "%Y-%m-%d")
+            end = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
+                               0, 0, 0, 0, 0, -1)) + 86400
+    except Exception:
+        return None, None
+    return start, end
+
+
+def recent_usage(limit=100, realm=None, page=1, total=None,
+                 from_day=None, to_day=None):
     """Paginated rows from the tail of the log (page 1 is latest).
 
     total：可选的**已算好**的总行数（如来自 usagedb 的 SQLite 计数）。
     不给时退回逐行扫描 JSONL 的 count_usage_rows —— 那个每次翻页都要过一遍
     整份日志（几十万行会很慢），所以调用方（/usage/recent）优先传 usagedb 的值。
+    from_day/to_day：本地日期（含两端），把结果限制在该时间范围内。
     """
     try:
         limit = max(1, int(limit))
@@ -572,19 +620,35 @@ def recent_usage(limit=100, realm=None, page=1, total=None):
         page = max(1, int(page))
     except Exception:
         page = 1
+    start_ts, end_ts = _day_bounds(from_day, to_day)
+    ranged = start_ts is not None or end_ts is not None
     if total is None:
-        total = count_usage_rows(realm)
+        total = count_usage_rows(realm, from_day=from_day, to_day=to_day)
     else:
         try:
             total = max(0, int(total))
         except Exception:
-            total = count_usage_rows(realm)
+            total = count_usage_rows(realm, from_day=from_day, to_day=to_day)
     total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
     page = min(page, total_pages)
     target_count = page * limit
     matching = []
     chunk = 256 * 1024
+
+    def _in_range(item):
+        if not ranged:
+            return True
+        at = item.get("at")
+        if not isinstance(at, (int, float)):
+            return False
+        if start_ts is not None and at < start_ts:
+            return False
+        if end_ts is not None and at >= end_ts:
+            return False
+        return True
+
     try:
+        stopped_early = False
         with open(runtime.USAGE_LOG, "rb") as fh:
             fh.seek(0, os.SEEK_END)
             pos = fh.tell()
@@ -604,15 +668,29 @@ def recent_usage(limit=100, realm=None, page=1, total=None):
                         item = json.loads(st.decode("utf-8", "replace"))
                     except Exception:
                         continue
+                    # 行按时间顺序追加：一旦扫到早于范围起点的行，更早的
+                    # 只会更旧，可以直接停（给日期过滤留出提前退出的路）。
+                    at = item.get("at")
+                    if ranged and start_ts is not None \
+                            and isinstance(at, (int, float)) and at < start_ts:
+                        stopped_early = True
+                        break
+                    if not _in_range(item):
+                        continue
                     if realm and not row_matches_realm(item, realm):
                         continue
                     matching.append(item)
                     if len(matching) >= target_count:
                         break
-            if len(matching) < target_count and buf.strip():
+                if stopped_early:
+                    break
+            # buf 只在「读到了文件开头」时才是完整首行（提前退出时它是
+            # 切块边界上的半行，不能解析）
+            if not stopped_early and len(matching) < target_count and buf.strip():
                 try:
                     item = json.loads(buf.strip().decode("utf-8", "replace"))
-                    if not realm or row_matches_realm(item, realm):
+                    if _in_range(item) \
+                            and (not realm or row_matches_realm(item, realm)):
                         matching.append(item)
                 except Exception:
                     pass
@@ -623,6 +701,18 @@ def recent_usage(limit=100, realm=None, page=1, total=None):
     start_idx = (page - 1) * limit
     end_idx = start_idx + limit
     page_rows = matching[start_idx:end_idx]
+    # 账号列显示昵称而非 uid 前缀：从账号池现查（同一 uid 稳定），拿不到
+    # （账号已删/池未就绪）时留空，前端回落 uid 前缀，绝不显示错名字。
+    for r in page_rows:
+        uid = str(r.get("account") or "")
+        nick = ""
+        if uid and runtime.POOL is not None:
+            try:
+                acc = runtime.POOL.get(uid)
+                nick = (acc.nickname or "") if acc else ""
+            except Exception:
+                nick = ""
+        r["account_name"] = nick
     return {
         "total": total,
         "page": page,

@@ -51,12 +51,10 @@ class AccountsRoutesMixin(object):
                                 "plan": account.plan,
                                 "error": res.get("error", "")})
             # 手动刷新额度后，看板 /tasks 也看到新快照（不吃 20s 面板缓存）
-            from qoder2api import tasks as qoder_tasks
             qoder_tasks.invalidate_panel_cache()
             return self._json(200, {"results": results,
                                     "accounts": account_views()})
         if path == "/tasks/run":
-            from qoder2api import tasks as qoder_tasks
             if not runtime.POOL:
                 return self._json(200, {"ok": False, "msg": "账号池不可用"})
             uid = payload.get("uid")
@@ -83,7 +81,6 @@ class AccountsRoutesMixin(object):
             })
         if path == "/tasks/travel":
             # 看板福利按钮的对应动作：批量领取 Pro 福利包（官方仅国内版 sash 活动）
-            from qoder2api import tasks as qoder_tasks
             if not runtime.POOL:
                 return self._json(200, {"ok": False, "msg": "账号池不可用"})
             uid = payload.get("uid")

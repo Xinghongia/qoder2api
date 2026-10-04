@@ -647,6 +647,35 @@ def round_note(items):
     return "每日 10:00 开启新一轮"
 
 
+def current_round_start(ts=None):
+    """当前活动轮次的起点（epoch 秒）：本地 10:00 滚动，10:00 前算前一天那一轮。
+
+    「已签到」判定必须以轮次为准而非自然日：上午 09:00 时若上一轮（昨天 10:00
+    起）已经领过，自然日比较会误判成"待签到"，而实际要等到 10:00 才是新一轮。
+    """
+    base = time.mktime(time.localtime(ts or time.time()))
+    lt = time.localtime(base)
+    start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                         10, 0, 0, 0, 0, -1))
+    if base < start:
+        start -= 86400
+    return start
+
+
+def _last_checkin_ts(value):
+    """把 lastCheckin（历史上有 "%Y-%m-%d %H:%M:%S" 与纯日期两种写法）解析成
+    epoch 秒；解析不了返回 None（调用方按"未知 = 当做待签到"处理）。"""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt, width in (("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)):
+        try:
+            return time.mktime(time.strptime(s[:width], fmt))
+        except Exception:
+            continue
+    return None
+
+
 def _is_daily_item(c):
     """是否为"每日领取 Credits"类活动（CLAIM_BENEFIT；空 action 视为可领）。"""
     return str(c.get("action_type") or "") in ("", "CLAIM_BENEFIT")
@@ -1079,14 +1108,18 @@ class Account(object):
         return self._checkin_cap, self._checkin_cap_reason
 
     def can_checkin(self):
-        """今日是否还需要签到（能力由运行时探测，不再按区域硬编码）。"""
-        capable, _ = self.checkin_capability()
-        if capable is False:
-            return False
+        """当前轮次是否还没领到（唯一判据：本地最近签到时间戳 vs 轮次起点）。
+
+        不再用"本区域有没有旧 /daily-check-in 接口"来闸门：现行机制是活动平台
+        （`campaign_checkin`），旧接口只作兜底——CN 的旧接口是 DISABLED，此前
+        会把能正常签到的账号误判成"本区无签到入口"并置灰按钮。
+        """
         if not self.last_checkin:
             return True
-        today_str = time.strftime("%Y-%m-%d")
-        return not str(self.last_checkin).startswith(today_str)
+        stamped = _last_checkin_ts(self.last_checkin)
+        if stamped is None:
+            return True
+        return stamped < current_round_start()
 
     def checkin_status(self):
         """GET daily-check-in/status -> (ok, summary|error)。
@@ -1482,6 +1515,11 @@ class Account(object):
                     views.append(c)      # 详情类活动：没有奖励可领，不算"已领取"
                 else:
                     already.append(c)
+                    if _is_credit_item(c):
+                        # 本轮确实已领到 Credits —— 可能是本网关领的，也可能是
+                        # 官方客户端/另一台网关领的（同一批账号）。这里如实把本地
+                        # 「最近签到」时间戳跟上，否则面板会一直显示"待签到"。
+                        self._stamp_checkin()
                 if self.campaign_codes.get(cid):
                     codes.append({"campaign": label, "code": self.campaign_codes[cid]})
                 continue

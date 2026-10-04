@@ -33,8 +33,26 @@ export default function AccountsPage() {
   const load = React.useCallback(async () => {
     setLoading(true);
     try {
-      const acc = await api.accounts.list('all');
-      setAccounts((acc?.accounts as AccountRow[]) || []);
+      // 账号列表 + 上游「本轮已签到」状态并行取：后者要打活动平台（20s 缓存、
+      // 并行拉取），单独请求，账号表首屏不必等它。
+      const [acc, round] = await Promise.all([
+        api.accounts.list('all'),
+        api.accounts
+          .checkinState()
+          .catch(() => null) as Promise<{accounts?: RoundState[]} | null>,
+      ]);
+      const merged = new Map<string, RoundState>();
+      for (const s of round?.accounts || []) {
+        if (s?.uid) merged.set(s.uid, s);
+      }
+      setAccounts(
+        ((acc?.accounts as AccountRow[]) || []).map((a) => {
+          const r = merged.get(a.uid);
+          return r
+            ? {...a, roundClaimed: r.claimed === true, roundNote: r.round_note}
+            : a;
+        }),
+      );
     } catch (e) {
       notify.err('账号列表加载失败', e instanceof Error ? e.message : String(e));
     } finally {
@@ -120,6 +138,14 @@ export default function AccountsPage() {
       <VmStatusCard realm={view} />
     </div>
   );
+}
+
+/** 后端 /accounts/checkin-state 的单账号「本轮」状态（qoder2api/tasks.py）。 */
+interface RoundState {
+  uid?: string;
+  claimed?: boolean;
+  claimable?: boolean;
+  round_note?: string;
 }
 
 /** 后端 /accounts/checkin 的单账号结果（qoder2api/api/accounts_routes.py）。 */

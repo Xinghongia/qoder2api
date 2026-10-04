@@ -947,8 +947,12 @@ check("404 status -> (ok, unavailable) with explicit reason",
 check("404 message names the missing endpoint + hand-off to official client",
       "daily-check-in" in str(res_intl.get("msg"))
       and "客户端" in str(res_intl.get("msg")), res_intl.get("msg"))
-check("capability cached as unavailable -> can_checkin False (no repeated 404s)",
-      cap_intl is False and acc_intl.can_checkin() is False and "404" in reason_intl)
+check("capability probe still recorded for diagnostics (no longer gates check-in)",
+      # 旧 /daily-check-in 接口没了不代表不能签到：现行机制是活动平台，
+      # 能力探测只作诊断信息保留（CN 的旧接口是 DISABLED，此前会把能正常
+      # 签到的账号误判成"本区无签到入口"并置灰按钮——旧看板是永远可点）。
+      cap_intl is False and "404" in reason_intl
+      and acc_intl.can_checkin() is True, (cap_intl, reason_intl))
 # TTL 到期后回到"未探测"，下一次调用会真的重探（活动上线即自动恢复）
 acc_intl._checkin_cap_at -= (_A.CHECKIN_PROBE_TTL + 1)
 check("TTL 过期 -> capability 回到 unknown，下一次触发重探",
@@ -3917,6 +3921,14 @@ check("both chat and responses routes pass the key through",
       _src35.count("key=key") >= 16, _src35.count("key=key"))
 check("upstream usage block reads the plural 'credits' field (billing)",
       'usage.get("credits") or usage.get("credit")' in _src35)
+# 计费是数值不是写法：上游发复数 credits，取到的就是本次请求的实际积分消耗
+_u35 = usage_mod._extract_usage({"prompt_tokens": 10, "total_tokens": 12,
+                                 "credits": 0.019215856})
+check("_extract_usage keeps the upstream plural credits value",
+      abs((_u35.get("credit") or 0) - 0.019215856) < 1e-12, _u35)
+_u35b = usage_mod._extract_usage({"total_tokens": 12, "credit": 0.5})
+check("_extract_usage still accepts the legacy singular credit",
+      (_u35b.get("credit") or 0) == 0.5, _u35b)
 check("cli boots the usage db and backfills in the background",
       "usagedb.db_path()" in _src35 and "threading.Thread(target=usagedb.sync" in _src35)
 
@@ -3948,10 +3960,15 @@ _src36 = _ALL_SRC
 check("/usage/recent total comes from the SQLite aggregate (no full JSONL scan per page)",
       "usagedb.count_requests(" in _src36
       and "total=total" in _src36
-      and "def count_requests(realm=\"\")" in _src36)
-check("recent_usage accepts a precomputed total and falls back to a scan",
-      "def recent_usage(limit=100, realm=None, page=1, total=None)" in _src36
-      and "total = count_usage_rows(realm)" in _src36)
+      and 'def count_requests(realm="", from_day=None, to_day=None)' in _src36)
+check("recent_usage accepts a precomputed total (and a day range) then falls back to a scan",
+      "def recent_usage(limit=100, realm=None, page=1, total=None,\n"
+      "                 from_day=None, to_day=None)" in _src36
+      and "total = count_usage_rows(realm, from_day=from_day, to_day=to_day)" in _src36)
+check("/usage/recent accepts from/to so the log follows the usage page's date range",
+      'query.get("from")' in _src36 and 'from_day=from_day or None' in _src36)
+check("recent rows carry the account nickname (uid kept for fallback)",
+      'r["account_name"] = nick' in _src36)
 check("usagedb counts failed rows too (matches the row list)",
       'out["requests"] = 1' in _src36 and 'out["failed"] = 1' in _src36)
 check("usagedb realm attribution falls back to exclusive models, like usage.py",
@@ -3962,9 +3979,15 @@ try:
         _ROOT, "web", "app", "(main)", "usage", "page.tsx"), encoding="utf-8").read()
 except OSError:
     pass
-check("usage page embeds the full request table",
+check("usage page embeds the full request table, scoped to the picked date range",
       "<RecentRequestsTable" in _usage_page36
-      and 'title="全部请求记录"' in _usage_page36)
+      and 'title="全部请求记录"' in _usage_page36
+      and "from={logRange.from}" in _usage_page36
+      and "to={logRange.to}" in _usage_page36)
+check("usage page log range maps today/7d/30d onto local days",
+      "isoDay(0), to: isoDay(0)" in _usage_page36
+      and "isoDay(-6)" in _usage_page36 and "isoDay(-29)" in _usage_page36
+      and "localDay" in _usage_page36)
 _page_dash36 = ""
 try:
     _page_dash36 = open(os.path.join(
@@ -3977,6 +4000,17 @@ check("shared table defaults to the plain 最近请求 title",
       "title = '最近请求'" in open(
           os.path.join(_ROOT, "web", "components", "common", "gateway",
                        "RecentRequestsTable.tsx"), encoding="utf-8").read())
+# 积分列：用量页的全量账单表尾显示每次请求实际消耗（上游 credits）——
+# 仪表盘预览保持 12 列，只有用量页通过 showCredit 打开第 13 列。
+_table36 = open(os.path.join(_ROOT, "web", "components", "common", "gateway",
+                             "RecentRequestsTable.tsx"), encoding="utf-8").read()
+check("full-log table appends the per-request credit column (opt-in)",
+      "showCredit" in _table36 and "credit?: number" in _table36
+      and "积分" in _table36)
+check("usage page turns the credit column on",
+      "showCredit" in _usage_page36)
+check("credit column reads the upstream value, 0 stays plain-zero",
+      "fmtCredit" in _table36 and "r.credit" in _table36)
 # 用量页的下拉框宽度必须够放「Token 消耗」（窄了会把文字截成「Token 消」）
 _trend36 = open(os.path.join(_ROOT, "web", "components", "common", "usage",
                              "UsageTrendCard.tsx"), encoding="utf-8").read()
@@ -3986,6 +4020,157 @@ _break36 = open(os.path.join(_ROOT, "web", "components", "common", "usage",
                              "BreakdownPanel.tsx"), encoding="utf-8").read()
 check("breakdown empty state sits in a fixed-height centred box",
       "min-h-[200px] place-items-center" in _break36)
+
+print()
+print("[37] round-window check-in state + stamp-on-already-claimed + checkin-state route")
+_A37 = A
+# 轮次起点：本地 10:00 滚动（10:00 前算前一天那一轮）
+_lt37 = time.localtime()
+_today10_37 = time.mktime((_lt37.tm_year, _lt37.tm_mon, _lt37.tm_mday,
+                           10, 0, 0, 0, 0, -1))
+check("current_round_start: 10:00 之后 = 当天 10:00",
+      _A37.current_round_start(_today10_37 + 3 * 3600) == _today10_37)
+check("current_round_start: 10:00 之前 = 前一天 10:00",
+      _A37.current_round_start(_today10_37 - 3 * 3600) == _today10_37 - 86400)
+check("_last_checkin_ts 解析两种历史写法，坏值返回 None",
+      _A37._last_checkin_ts("2026-10-04 11:22:33") is not None
+      and _A37._last_checkin_ts("2026-10-04") is not None
+      and _A37._last_checkin_ts("") is None
+      and _A37._last_checkin_ts("garbage") is None)
+
+_acc_rw37 = _A37.Account({"uid": "rw37", "realm": "cn", "accessToken": "dt-x"})
+_orig_round37 = _A37.current_round_start
+try:
+    _A37.current_round_start = lambda ts=None: _today10_37
+    _acc_rw37.last_checkin = time.strftime(
+        "%Y-%m-%d %H:%M:%S", time.localtime(_today10_37 + 3600))
+    check("本轮已领（11:00 领的，轮次 10:00 起）-> can_checkin False",
+          _acc_rw37.can_checkin() is False)
+    _acc_rw37.last_checkin = time.strftime(
+        "%Y-%m-%d %H:%M:%S", time.localtime(_today10_37 - 3600))
+    check("上一轮领的（09:00）-> 新轮次可以再签（True）",
+          _acc_rw37.can_checkin() is True)
+    _acc_rw37.last_checkin = "2026-10-04"      # 纯日期老格式也能解析
+    check("纯日期格式按当天 00:00 处理（早于 10:00 轮次 -> 待签到）",
+          _acc_rw37.can_checkin() is True)
+    _acc_rw37.last_checkin = "garbage"
+    check("无法解析的时间戳按待签到处理（保守）", _acc_rw37.can_checkin() is True)
+finally:
+    _A37.current_round_start = _orig_round37
+
+# 已领取（别处领的）也要把本地时间戳跟上，否则面板永远显示"待签到"
+_orig_camp37 = _A37.Account.campaigns
+try:
+    for _kind, _expect_stamp in (("CREDITS", True), ("REDEMPTION_CODE", False)):
+        _acc_st37 = _A37.Account({"uid": "st37-%s" % _kind, "realm": "cn",
+                                  "accessToken": "dt-x"})
+        _A37.Account.campaigns = lambda self, force=False, _k=_kind: {
+            "ok": True, "available": True, "show_campaign": True,
+            "claimable": False, "campaign_url": "",
+            "campaigns": [{"campaign_id": "c1", "campaign_key": "k1",
+                           "action_type": "CLAIM_BENEFIT",
+                           "claim_status": "CLAIMED", "start_at": 0, "end_at": 0,
+                           "benefit": {"kind": _k, "amount": 100},
+                           "required_achievement_key": "",
+                           "achievement_completed": False,
+                           "unavailable_reason": "", "placements": []}]}
+        _r37 = _acc_st37.campaign_checkin(gap=0)
+        _stamped = bool(_acc_st37.last_checkin)
+        if _kind == "CREDITS":
+            check("活动已 CLAIMED（别处领的）-> 本地「最近签到」补记，面板不再卡在待签到",
+                  _stamped and _r37.get("already"), (_stamped, _acc_st37.last_checkin))
+        else:
+            check("券类已 CLAIMED 不算签到 -> 不补记时间戳（签到只认 Credits）",
+                  not _stamped, _acc_st37.last_checkin)
+finally:
+    _A37.Account.campaigns = _orig_camp37
+
+# checkin_round_states：账号表徽标数据源（以活动平台为准）
+_orig_camp37b = _A37.Account.campaigns
+try:
+    _pool37 = type("P37", (), {})()
+    _pool37.accounts = [
+        _A37.Account({"uid": "u-a", "realm": "cn", "accessToken": "dt-a"}),
+        _A37.Account({"uid": "u-b", "realm": "cn", "accessToken": "dt-b"}),
+    ]
+    _pool37.accounts[0].campaigns = lambda force=False: {
+        "ok": True, "show_campaign": True, "campaignable": True, "available": True,
+        "campaigns": [{"campaign_id": "c", "campaign_key": "k",
+                       "action_type": "CLAIM_BENEFIT", "claim_status": "CLAIMED",
+                       "start_at": 0, "end_at": int(time.time()) + 3600,
+                       "benefit": {"kind": "CREDITS", "amount": 100},
+                       "required_achievement_key": "", "achievement_completed": False,
+                       "unavailable_reason": "", "placements": []}]}
+    _pool37.accounts[1].campaigns = lambda force=False: {
+        "ok": True, "show_campaign": True, "available": True,
+        "campaigns": [{"campaign_id": "c", "campaign_key": "k",
+                       "action_type": "CLAIM_BENEFIT", "claim_status": "CLAIMABLE",
+                       "start_at": 0, "end_at": 0,
+                       "benefit": {"kind": "CREDITS", "amount": 100},
+                       "required_achievement_key": "", "achievement_completed": False,
+                       "unavailable_reason": "", "placements": []}]}
+    _states37 = T.checkin_round_states(_pool37, "cn")
+finally:
+    _A37.Account.campaigns = _orig_camp37b
+check("checkin_round_states：已领/可领分别标注（账号表徽标数据源）",
+      _states37.get("u-a", {}).get("claimed") is True
+      and _states37.get("u-a", {}).get("claimable") is False
+      and _states37.get("u-b", {}).get("claimed") is False
+      and _states37.get("u-b", {}).get("claimable") is True, _states37)
+check("checkin_round_states 带轮次说明（悬停展示）",
+      "10:00" in str(_states37.get("u-a", {}).get("round_note")),
+      _states37.get("u-a", {}).get("round_note"))
+
+check("/accounts/checkin-state 路由存在（面板鉴权 + realm 过滤）",
+      'if path == "/accounts/checkin-state":' in _ALL_SRC
+      and "checkin_round_states(" in _ALL_SRC)
+_acc_page37 = open(os.path.join(_ROOT, "web", "app", "(main)", "accounts",
+                                "page.tsx"), encoding="utf-8").read()
+check("账号页并行拉取本轮状态并合并进行数据",
+      ".checkinState()" in _acc_page37 and "roundClaimed" in _acc_page37)
+_tbl37 = open(os.path.join(_ROOT, "web", "components", "common", "gateway",
+                           "AccountTable.tsx"), encoding="utf-8").read()
+check("账号表：上游已领显示「本轮已签到」；签到按钮不再按旧接口置灰",
+      '本轮已签到' in _tbl37 and "noCheckinCap" not in _tbl37
+      and "disabled={checkinLocked}" in _tbl37)
+check("账号页/账号表不再使用会误判的 checkinCapability 置灰逻辑",
+      'checkinCapability === ' not in _tbl37)
+
+print()
+print("[38] 静态护栏：函数内的 import 不得遮蔽模块级导入（UnboundLocalError 陷阱）")
+# 背景（线上故障）：函数里写 `from qoder2api import tasks as qoder_tasks` 会把该
+# 名字变成**整个函数**的局部名，于是同一函数里更早的分支用它就会
+# UnboundLocalError —— /accounts/checkin 曾因此整个 500（前端显示 Failed to fetch）。
+# 模块级已有同名导入时，函数内再导入一次永远是冗余且危险的，一律禁止。
+import ast as _ast38
+_shadow38 = []
+for _root38, _dirs38, _files38 in os.walk(os.path.join(_ROOT, "qoder2api")):
+    _dirs38[:] = [d for d in _dirs38 if d != "__pycache__"]
+    for _f38 in sorted(_files38):
+        if not _f38.endswith(".py"):
+            continue
+        _path38 = os.path.join(_root38, _f38)
+        with open(_path38, encoding="utf-8") as _fh38:
+            _tree38 = _ast38.parse(_fh38.read(), _path38)
+        _mod_names38 = set()
+        for _node38 in _tree38.body:
+            if isinstance(_node38, _ast38.ImportFrom) or isinstance(_node38, _ast38.Import):
+                for _a38 in _node38.names:
+                    _mod_names38.add((_a38.asname or _a38.name).split(".")[0])
+        for _fn38 in _ast38.walk(_tree38):
+            if not isinstance(_fn38, (_ast38.FunctionDef, _ast38.AsyncFunctionDef)):
+                continue
+            for _sub38 in _ast38.walk(_fn38):
+                if not isinstance(_sub38, (_ast38.ImportFrom, _ast38.Import)):
+                    continue
+                for _a38 in _sub38.names:
+                    _nm38 = (_a38.asname or _a38.name).split(".")[0]
+                    if _nm38 in _mod_names38:
+                        _shadow38.append("%s:%d %s in %s()" % (
+                            os.path.relpath(_path38, _ROOT), _sub38.lineno,
+                            _nm38, _fn38.name))
+check("函数内不再出现遮蔽模块级导入的局部 import",
+      not _shadow38, _shadow38)
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

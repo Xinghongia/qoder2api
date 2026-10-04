@@ -206,6 +206,9 @@ export const api = {
   models: (realm?: Realm) => http.get(`/v1/models${realm ? `?realm=${realm}` : ''}`),
   accounts: {
     list: (realm: string = 'all') => http.get(`/accounts?realm=${realm}`),
+    /** 每账号「本轮已签到」状态（以活动平台为准，单独请求避免拖慢账号表首屏）。 */
+    checkinState: (realm?: string) =>
+      http.get(`/accounts/checkin-state${realm ? `?realm=${realm}` : ''}`),
     // 额度快照刷新：POST /accounts/credits 支持 {uid} 单账号 / {} 全部账号
     // （GET 版本忽略 realm 且无法指定 uid，与后端不一致，故改为 POST）。
     credits: (uid?: string) => http.post('/accounts/credits', uid ? {uid} : {}),
@@ -234,8 +237,17 @@ export const api = {
   },
   usage: {
     summary: (realm?: string) => http.get(`/usage${realm ? `?realm=${realm}` : ''}`),
-    recent: (limit: number, page: number, realm?: string) =>
-      http.get(`/usage/recent?limit=${limit}&page=${page}${realm ? `&realm=${realm}` : ''}`),
+    /**
+     * 分页请求记录。from/to 为本地日期（YYYY-MM-DD，含两端，可选）：
+     * 用量页的「全部请求记录」跟随时间范围；不传 = 不限时间（最近 N 条）。
+     */
+    recent: (limit: number, page: number, realm?: string, from?: string, to?: string) => {
+      const q = new URLSearchParams({limit: String(limit), page: String(page)});
+      if (realm) q.set('realm', realm);
+      if (from) q.set('from', from);
+      if (to) q.set('to', to);
+      return http.get(`/usage/recent?${q.toString()}`);
+    },
     perf: (realm?: string) => http.get(`/usage/perf${realm ? `?realm=${realm}` : ''}`),
     byAccount: () => http.get('/usage/by-account'),
     analytics: (scope: 'today' | 'all') => http.get(`/usage/analytics?scope=${scope}`),

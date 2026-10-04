@@ -31,8 +31,18 @@ import time
 from . import runtime
 from .logbus import log
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 DB_FILENAME = "usage.db"
+
+# 聚合口径的哨兵与显示名：
+#   ""  —— 行里明确没有密钥（未开启鉴权的调用：key_id 字段存在但为空）
+#   LEGACY_KEY_ID —— v1.2.7 之前落的历史行**根本没有 key_id 字段**（当时还没有
+#   这个维度）。两者分开统计，面板上分别显示，不再混成一句含糊的「未绑定 Key」。
+LEGACY_KEY_ID = "__legacy__"
+KEY_LABELS = {
+    "": "未使用密钥",
+    LEGACY_KEY_ID: "旧版数据（升级前）",
+}
 
 # 趋势图最多画多少条序列（超出折叠为「其他」）；表页仍返回全部行。
 TOP_SERIES = 8
@@ -101,7 +111,18 @@ def _ensure_schema(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hourly_day ON usage_hourly(day)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_day ON usage_daily(day)")
-    conn.execute("INSERT OR IGNORE INTO meta(k, v) VALUES ('schema_version', ?)",
+    row = conn.execute("SELECT v FROM meta WHERE k = 'schema_version'").fetchone()
+    old = row["v"] if row else ""
+    if old and old != SCHEMA_VERSION:
+        # 口径升级：聚合表只是 JSONL 的投影，直接清空重放（成本 = 一次全量导入）。
+        # v1 -> v2：把「没有 key_id 字段」的历史行与「有字段但为空」的行分开，
+        # 否则面板上历史数据会冒充成"未使用密钥"。
+        conn.execute("DELETE FROM usage_hourly")
+        conn.execute("DELETE FROM usage_daily")
+        conn.execute("DELETE FROM meta WHERE k = 'jsonl_offset'")
+        log("usagedb: 聚合口径 v%s -> v%s，清空聚合表按新口径重放 JSONL"
+            % (old, SCHEMA_VERSION))
+    conn.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('schema_version', ?)",
                  (SCHEMA_VERSION,))
     conn.commit()
 
@@ -176,13 +197,21 @@ def _row_counters(row):
 
 
 def _row_bucket(row):
-    """一行 JSONL -> ((day, hour), (realm, model, key_id, key_name), counters)。"""
+    """一行 JSONL -> ((day, hour), (realm, model, key_id, key_name), counters)。
+
+    密钥维度分三态：有 key_id 字段且非空 -> 真实密钥；有字段但为空 -> 未使用
+    密钥（未开鉴权的调用）；**根本没有该字段** -> v1.2.7 之前的旧版数据
+    （那时还没记录密钥维度），用哨兵值单独成桶，不得冒充"未使用密钥"。
+    """
     at = row.get("at")
     if not isinstance(at, (int, float)):
         return None
     day, hour = _day_hour(at)
-    key_id = str(row.get("key_id") or "")
-    key_name = str(row.get("key_name") or "")
+    if "key_id" in row:
+        key_id = str(row.get("key_id") or "")
+        key_name = str(row.get("key_name") or "")
+    else:
+        key_id, key_name = LEGACY_KEY_ID, ""
     return (day, hour), (_row_realm(row), str(row.get("model") or ""),
                          key_id, key_name), _row_counters(row)
 
@@ -377,6 +406,14 @@ def _granularity_for(days, requested):
     return "hour" if days <= 2 else "day"
 
 
+def key_display(key_id, key_name=""):
+    """密钥分组的展示名：哨兵桶（旧版数据 / 未使用密钥）用固定中文标签，
+    真实密钥用记录时的名字，名字缺失才回落 key_id 本身。"""
+    if key_id in KEY_LABELS:
+        return KEY_LABELS[key_id]
+    return key_name or key_id
+
+
 def _trend(conn, from_day, to_day, realm, group, granularity, labels, days):
     """趋势序列：labels 长度的数组，缺失桶补 0；按 total_tokens 取前 N 条。"""
     if granularity == "hour":
@@ -391,14 +428,15 @@ def _trend(conn, from_day, to_day, realm, group, granularity, labels, days):
                         group_cols, bucket_cols)
 
     # 密钥分组时 id 是稳定键、名称会变（改名/删除），显示名单独解析：
-    # 取窗口内最后见到的 key_name；从未有名字（历史行）回落「未绑定 Key」。
+    # 取窗口内最后见到的 key_name；空桶/旧版桶走 key_display 的固定标签。
     key_titles = {}
     if group == "key_id":
         where, args = _where(realm, from_day, to_day)
         for kr in conn.execute(
                 "SELECT key_id, MAX(key_name) AS key_name FROM usage_daily "
                 "WHERE %s GROUP BY key_id" % where, args).fetchall():
-            key_titles[str(kr["key_id"] or "")] = str(kr["key_name"] or "")
+            kid = str(kr["key_id"] or "")
+            key_titles[kid] = key_display(kid, str(kr["key_name"] or ""))
 
     index = {label: i for i, label in enumerate(labels)}
     series = {}
@@ -415,7 +453,7 @@ def _trend(conn, from_day, to_day, realm, group, granularity, labels, days):
             name = title = "总量"
         elif group == "key_id":
             name = str(r["key_id"] or "")
-            title = key_titles.get(name) or "未绑定 Key"
+            title = key_titles.get(name) or "未使用密钥"
         else:
             name = title = str(r["model"] or "")
         slot = series.setdefault(name, {
@@ -475,8 +513,12 @@ def stats(from_day, to_day, realm="", group="total", granularity=None):
                 "WHERE %s GROUP BY key_id "
                 "ORDER BY SUM(total_tokens) DESC, SUM(requests) DESC"
                 % (_SUM_COLS, where), args).fetchall():
-            by_key.append(_sum_row(r) | {"key_id": r["key_id"] or "",
-                                         "key_name": r["key_name"] or ""})
+            kid = str(r["key_id"] or "")
+            by_key.append(_sum_row(r) | {
+                "key_id": kid,
+                "key_name": key_display(kid, str(r["key_name"] or "")),
+                # 标记该桶是"没有真实密钥"的聚合桶（前端可用于弱化显示）
+                "is_placeholder": kid in KEY_LABELS})
         trend = _trend(conn, from_day, to_day, realm, group, gran, labels, days)
     summary["cache_hit_pct"] = (round(summary["cached_tokens"] * 100.0
                                       / summary["prompt_tokens"], 1)
@@ -493,23 +535,28 @@ def stats(from_day, to_day, realm="", group="total", granularity=None):
     }
 
 
-def count_requests(realm=""):
+def count_requests(realm="", from_day=None, to_day=None):
     """请求总条数（含失败行）—— /usage/recent 分页总数用，避免全扫 JSONL。
 
     口径：一行请求记 1（错误行也记，与 recent_usage 的返回行数一致）。
-    先做一次增量 sync，保证刚发生的请求立刻计入；统计库不可用时由调用方
-    回退到逐行扫描。
+    可选 from_day/to_day（YYYY-MM-DD，本地日，含两端）把计数限制在时间范围内
+    ——用量页的「全部请求记录」跟随日期选择走。先做一次增量 sync，保证刚发生
+    的请求立刻计入；统计库不可用时由调用方回退到逐行扫描。
     """
     sync()
+    clauses, args = [], []
+    if from_day and to_day:
+        clauses.append("day BETWEEN ? AND ?")
+        args += [from_day, to_day]
+    if realm in ("cn", "intl"):
+        clauses.append("realm = ?")
+        args.append(realm)
+    sql = "SELECT SUM(requests) AS n FROM usage_daily"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     with _LOCK:
         conn = _connect()
-        if realm in ("cn", "intl"):
-            row = conn.execute(
-                "SELECT SUM(requests) AS n FROM usage_daily WHERE realm = ?",
-                (realm,)).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT SUM(requests) AS n FROM usage_daily").fetchone()
+        row = conn.execute(sql, args).fetchone()
         return int((row["n"] if row else 0) or 0)
 
 

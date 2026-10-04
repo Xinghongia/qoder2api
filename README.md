@@ -1,7 +1,7 @@
 # Qoder2API-Hub — 国际版、国内版多账号网关中枢
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.7-2496ED?style=flat-square" alt="Version 1.2.7">
+  <img src="https://img.shields.io/badge/Release-v1.2.8-2496ED?style=flat-square" alt="Version 1.2.8">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -330,9 +330,11 @@ custom freeform 工具（`apply_patch`）自动降级为 function 工具出站�
 | POST | /accounts/login/start | 发起 OAuth 设备授权 |
 | POST | /accounts/import/pat | 导入 PAT 令牌 |
 | POST | /accounts/checkin | 手动每日签到（单个/全部；只领 Credits 类，不动券类） |
+| GET | /accounts/checkin-state | 各账号「本轮已签到」状态（活动平台判定，账号表徽标用；`realm=` 可选） |
 | GET | /diag/vm | 本机虚拟化检测（中文；官方风控桥 vmInfo + 本机交叉校验） |
 | GET | /update/check | 项目新版本检测（对比 GitHub release；6h 缓存，`force=1` 强刷） |
 | GET | /usage/daily | 按天汇总（仪表盘 14 天趋势；`days=` 1-90，`realm=` 过滤） |
+| GET | /usage/recent | 分页请求记录（`limit`≤100、`page`、`realm`、可选 `from`/`to`=YYYY-MM-DD 本地日） |
 | GET | /usage/stats | 用量统计（SQLite 聚合库；`range=today\|7d\|30d\|custom` + `from`/`to`，`group=total\|model\|key_id`，`granularity=auto\|hour\|day`，`realm=` 过滤） |
 | GET | /identity/export | 导出本机机器身份（面板鉴权；给没有官方客户端的服务器固定用） |
 
@@ -434,14 +436,28 @@ qoder2api-hub/
 
 完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)。
 
+### v1.2.8
+
+**修复：/accounts/checkin 整个 500（前端 Failed to fetch）+ 签到状态判定改按活动平台与轮次窗口**
+
+- **P0 崩溃**：`accounts_routes.py` 里三个函数内的 `from qoder2api import tasks as qoder_tasks` 把该名字变成了**整个函数**的局部名，而同函数更早的「每日签到」分支同用它 —— `/accounts/checkin` 必然 `UnboundLocalError` 500（前端只看到 Failed to fetch）。模块级本就有同一导入，三处局部导入全是冗余，已删除；顺带清掉 `upstream.py` 里同类写法，并**新增 AST 静态护栏**：函数内 import 遮蔽模块级同名导入一律断言失败（`tests/test_qoder.py` [38]）。同一 bug 修了两遍——`/usage/recent` 的总数查询也曾因此静默回退。
+- **签到状态改按轮次 + 上游判定**：「已签到」不再只看本地时间戳与自然日：
+  · **轮次窗口**：每日领取按本地 **10:00** 滚动（10:00 ~ 次日 09:59，与官方一致）。旧判定按自然日比较，上午 10 点前会把"上一轮已领"误判成"待签到"（或反之）；
+  · **上游为准**：账号可能被官方客户端/另一台网关领走，本地时间戳只记录"本网关领过"。新增 `GET /accounts/checkin-state`（并行拉取各账号活动状态、走 20s 缓存）供账号表打「本轮已签到」徽标；活动列表判定为已领取时也会**回写本地时间戳**，面板不再卡在"待签到"；
+  · 账号表不再按"本区域有没有旧 daily-check-in 接口"置灰签到按钮——旧接口在 CN 是 DISABLED 而活动平台正常，此前会把能签到的账号误判成"本区无签到入口"（旧看板是永远可点）。已领账号的签到提示如实回报「本轮奖励已领取（…）本轮截止 X」。
+- 账号表「待签到 N」计数同步改用上游判定。
+- **用量页「全部请求记录」新增「积分」列**：表尾直接显示**每次请求实际消耗的积分**（上游响应用量块的 `credits`，与「积分消耗」KPI、按模型/按密钥明细同源）——为 0 表示本次未计费（免费模型），失败行显示 `—`，非零以琥珀色标出便于一眼找出"烧积分"的请求。该列只在用量页开启，仪表盘「最近请求」保持原 12 列预览。
+
 ### v1.2.7
 
 **新增「用量统计」页（SQLite 持久化，按时间 / 模型 / 密钥维度）**
 
 - **页面**：底栏「治理」组新增「用量」（在「统计」左侧，`/usage`）。时间范围 `今天`（按小时）/ `近 7 天` / `近 30 天` / `自定义`（起止日期，跨度上限 400 天）；顶部 4 张 KPI（请求数、Token 消耗、缓存命中率、积分消耗，后者含平均 tokens/请求）；趋势卡片可切 **Token 消耗 / 请求量** 与 **总量 / 按模型 / 按密钥**（当日 = 柱状、末柱高亮；按天 = 面积；多序列堆叠并折叠「其他」；请求量视图叠一条失败虚线）；下方「按模型」「按密钥」明细表（彩色圆点 + 占比进度条，列为请求数 / Token（输入·输出）/ 积分）。**每 60 秒自动刷新**（标签页隐藏时跳过，切回立即补一次），区域跟随右上角的国际版/国内版切换。
 - **存储**：`usage/usage.db`（stdlib `sqlite3`，WAL）。`usage.jsonl` 仍是**唯一真源**（追加写），统计库是它的**增量投影**：按字节 offset 只导入新行、`usage_daily` + `usage_hourly` 双粒度 UPSERT 累加，聚合行与 offset **同事务**提交（崩溃只会回滚，绝不重复计数）；文件被截断/轮转时把 offset 夹回文件末尾并告警（宁丢一段历史也不二次累加）；导入遇半行（进程被杀）自动停下等下一轮补。**无限期保留**（每「天×区域×模型×密钥」一行，一年也就几千行）。统计库损坏可直接删掉重建（下次查询自动从 JSONL 全量重放，`usagedb.rebuild()` 亦可主动重建）。
-- **密钥维度**：请求行新增 `key_id` / `key_name`（取自本次请求所用的 API Key，面板会话/未开鉴权为空 → 统计里显示「未绑定 Key」）；失败行同样带密钥与区域（按「Key 绑定出口 > 网关当前出口」归属），失败请求也能按密钥/区域统计。
-- **全部请求记录**：页面底部内嵌**完整**请求日志表（与仪表盘同一张表，服务端分页，可一路翻到底）——仪表盘的「最近请求」只是最近 100 条的预览，**所有历史记录都在这一页看**。分页总数改由 SQLite 聚合库求和（`SUM(requests)`），不再每次翻页逐行扫描 JSONL（几十万行时会明显拖慢）；统计库不可用时自动回退旧的全扫口径。
+- **密钥维度**：请求行新增 `key_id` / `key_name`（取自本次请求所用的 API Key）；失败行同样带密钥与区域（按「Key 绑定出口 > 网关当前出口」归属），失败请求也能按密钥/区域统计。三态显示见下。
+- **全部请求记录**：页面底部内嵌**完整**请求日志表（与仪表盘同一张表，服务端分页，可一路翻到底），并**跟随上方的时间范围**（今天/近 7/30 天/自定义，服务端按日过滤并在越界时提前停止扫描）——仪表盘的「最近请求」只是最近 100 条的预览，**所有历史记录都在这一页看**。分页总数改由 SQLite 聚合库求和（`SUM(requests)`，同样带日期范围），不再每次翻页逐行扫描 JSONL；统计库不可用时自动回退旧的全扫口径。
+- **账号列显示昵称**：请求表（仪表盘与用量页共用）的账号列显示 `aliyun3780958258` 这样的账号名而非 uid 前缀——后端在每行现查账号池补 `account_name`，账号已删时回落 uid 前缀（悬停可见完整 uid）。
+- **密钥维度分三态**：真实密钥按记录时的名字；`key_id` 字段为空 = **「未使用密钥」**（未开启鉴权的调用）；**没有该字段的历史行** = **「旧版数据（升级前）」**（v1.2.7 之前还没记录密钥维度）。三类分开统计，不再混成一句含糊的「未绑定 Key」；聚合口径版本号 v1→v2，升级后首次连接自动清空聚合表按新口径重放 JSONL（几秒钟，无需手工操作）。
 - **接口**：`GET /usage/stats?range=today|7d|30d|custom&from=&to=&realm=&group=total|model|key_id&granularity=auto|hour|day`（面板鉴权）→ `{range, summary, by_model, by_key, trend}`；`granularity=auto` 时跨度 ≤2 天按小时、其余按天。`GET /usage/recent` 的每页上限由 1000 收紧到 **100**（单页最多 100 条；总条数与翻页不受限，看全量走用量页）。
 - **顺带修复**：用量行的计费字段此前只读单数 `credit`，而上游实际发的是复数 `credits` —— 所有请求的积分消耗被记成 0（统计页「积分消耗」因此恒为 0）；现已兼容两种写法。
 - **构建陷阱修复**：`.gitignore` 里的 `usage/`（无前导斜杠）会匹配**任意层级**的同名目录，把前端路由 `web/app/(main)/usage/`、`web/components/common/usage/`、`web/out/usage/` 一并忽略——文件不入库，且 Tailwind 扫描器跳过该目录，新页面的工具类整块不进 CSS（表现为卡片塌陷、图表 0 高度）。已改为锚定仓库根的 `/usage/`，并加断言防回归。
