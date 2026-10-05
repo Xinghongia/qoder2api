@@ -61,7 +61,9 @@ export function AuthProvider({children}: {children: React.ReactNode}) {
     void refreshStatus();
   }, [refreshStatus]);
 
-  // 任何一个请求撞上 401/403 都回到登录框（与旧看板一致，不整页跳转）
+  // 请求撞上 401（会话无效）才回到登录框（与旧看板一致，不整页跳转）；
+  // 403 是服务端有意的拒绝（如「默认密码不交明文 Key」），会话是好的，
+  // 由调用方把服务端说明原样提示，不能弹登录框（上游 v1.2.9）。
   React.useEffect(() => onUnauthorized(() => setNeedsLogin(true)), []);
 
   const login = React.useCallback(async (username: string, password: string) => {

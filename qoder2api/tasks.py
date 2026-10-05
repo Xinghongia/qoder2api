@@ -757,7 +757,10 @@ def fetch_tasks_view(pool, realm=None, uid=None):
 # 单账号：签到执行
 # ---------------------------------------------------------------------------
 def run_checkin(account, gap=1.0, only_daily=False, claim_gap=None):
-    """为一个账号执行签到闭环。返回 {ok, logs, earned_credit, credits}。
+    """为一个账号执行签到闭环。返回 {ok, logs, earned_credit, credits}；
+    活动平台路径另带 message/claimed/next_available_at/next_available_note
+    （原样带出 campaign_checkin 的结论，供 HTTP 层透传给前端；旧 sash
+    兜底路径不带这些字段）。
 
     顺序（与官方现状一致）：
       1. **活动平台**（campaign-checkin）：当前"每日领取 100 Credits"等限时活动
@@ -826,8 +829,20 @@ def run_checkin(account, gap=1.0, only_daily=False, claim_gap=None):
         if account.fetch_credits().get("ok"):
             logs.append(f"  当前额度余额: {account.credits.get('remain', 0)}")
         account.fetch_plan()
+        # 活动平台的结论字段**原样带出**（供 /accounts/checkin 的 result 项透传到
+        # 前端）：只带出、不改写语义；msg 仍取 logs 尾行（那里是余额行）。
+        #   message             活动平台结论文本（campaign_checkin 的 message）
+        #   claimed             本轮**真实新增**的活动名（字符串列表，前端按
+        #                       Array.isArray + typeof string 判定）
+        #   next_available_at   下一个「每日 10:00（UTC+8）」的 epoch 秒
+        #   next_available_note 同一时刻的可读文本（UTC+8 固定呈现）
         return {"ok": True, "logs": logs, "earned_credit": earned,
-                "credits": account.credits, "campaign": camp.get("message")}
+                "credits": account.credits, "campaign": camp.get("message"),
+                "message": camp.get("message"),
+                "claimed": [qoder_accounts.campaign_label(c)
+                            for c in camp.get("claimed") or []],
+                "next_available_at": camp.get("next_available_at"),
+                "next_available_note": camp.get("next_available_note")}
 
     # --- 2) 旧 sash 签到接口兜底 ---
     # Account.checkin() 内部已带状态前置与 DISABLED 守卫（不硬 claim）

@@ -170,6 +170,14 @@ class AccountsRoutesMixin(object):
                     "msg": (res.get("logs") or [""])[-1],
                     "logs": res.get("logs") or [],
                     "credits": res.get("credits"),
+                    # 活动平台的精确结论（upstream issue #20）：ok 只代表"这次
+                    # 请求没报错"，是否真到账要看 claimed / earned_credit。
+                    # 新增而非替换：msg/logs/credits 原样保留；旧 sash 兜底路径
+                    # 没有这些字段时是 None，由前端兼容。
+                    "message": res.get("message"),
+                    "claimed": res.get("claimed"),
+                    "next_available_at": res.get("next_available_at"),
+                    "next_available_note": res.get("next_available_note"),
                 })
             qoder_tasks.invalidate_panel_cache()   # 写操作后失效面板短缓存
             return self._json(200, {"results": results,

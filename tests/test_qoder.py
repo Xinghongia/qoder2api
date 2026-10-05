@@ -4467,5 +4467,119 @@ finally:
     runtime.REALM_MODE, runtime.REALM_PREFERRED, runtime.CURRENT_REALM = _orig_mode42
 
 print()
+print("[43] 收尾帧不重复吐字 + 面板 401/403 分开 + 签到如实上报（上游 v1.2.7/v1.2.9/v1.2.15）")
+import calendar
+
+
+def _assemble43(frames, names=("terminal",)):
+    """把 recover_leaked_tool_calls 的输出帧拼成客户端最终看到的正文。"""
+    out = "".join(f.decode("utf-8") for f in _CN.recover_leaked_tool_calls(
+        iter(frames), set(names)))
+    text = ""
+    for ln in out.splitlines():
+        if ln.startswith("data: "):
+            p = json.loads(ln[6:])
+            for ch in p.get("choices") or []:
+                if isinstance(ch, dict):
+                    text += (ch.get("delta") or {}).get("content") or ""
+    return text, out
+
+
+# --- (1) 收尾帧重复吐字（上游 v1.2.7 顺带发现的既存缺陷）--------------
+# 正文以 "[" 结尾时缓冲进 hold，收尾帧若原样重放 content，同一个 chunk
+# 会被发两次（"[" + "x" -> "[xx"）。修法：重放时去掉 content。
+_txt43a, _out43a = _assemble43([_raw32("["), _raw32("x", "stop")])
+check("正文以 [ 结尾时收尾帧不再重复吐字（[x 而非 [xx）",
+      _txt43a == "[x", (_txt43a, _out43a[:200]))
+_txt43b, _ = _assemble43([_raw32("hel"), _raw32("lo", "stop")])
+check("普通正文分段拼接不受影响", _txt43b == "hello", _txt43b)
+_txt43c, _ = _assemble43([
+    _raw32(_M32), _raw32(" 这是一段解释文字。", "stop")])
+check("候选被证伪时整段补发且不重复",
+      _txt43c == _M32 + " 这是一段解释文字。", _txt43c)
+_txt43d, _ = _assemble43([_raw32(_LEAK32)])
+check("真泄漏仍被还原成 tool_calls（正文清空）", _txt43d == "", _txt43d)
+check("源码：收尾帧重放必须去掉 content（防复发静态护栏）",
+      "_frame_without_content(payload), fin)" in _ALL_SRC
+      and _ALL_SRC.count("finished = (payload, fin)") == 1,   # 仅剩无 content 的那处
+      _ALL_SRC.count("finished = (payload, fin)"))
+
+# --- (2) 面板 401/403 分开 --------------------------------------------
+_api43 = open(os.path.join(_ROOT, "web", "lib", "api.ts"), encoding="utf-8").read()
+check("api.ts：只有 401 触发登录弹窗（403 不再当会话失效）",
+      "function authStatusIs401(status: number)" in _api43
+      and "if (status !== 401) return false;" in _api43
+      and "r.status === 401 || r.status === 403" not in _api43)
+check("api.ts：403 走统一的错误体解析（服务端说明原样抛出）",
+      _api43.count("throw errorFromBody(r.status, text)") == 2
+      and "function errorFromBody(status: number, text: string)" in _api43)
+_auth43 = open(os.path.join(_ROOT, "web", "lib", "auth-context.tsx"),
+               encoding="utf-8").read()
+check("auth-context：401 才回登录框（注释已同步口径）",
+      "onUnauthorized(() => setNeedsLogin(true))" in _auth43
+      and "403 是服务端有意的拒绝" in _auth43)
+
+# --- (3) 签到如实上报 --------------------------------------------------
+# 3a. 轮次窗口：下一个每日 10:00（UTC+8）——与整数参考实现对拍（含跨月/跨年）
+def _ref43(y, mo, d, h, mi, s=0):
+    """UTC+8 的 (y-mo-d h:mi) -> epoch 秒（= UTC 减 8 小时的 timegm）。"""
+    return calendar.timegm((y, mo, d, h - 8, mi, s, 0, 0, 0))
+
+
+check("窗口：10:00 前 -> 当天 10:00",
+      A.next_checkin_window(_ref43(2026, 10, 5, 9, 59, 59))
+      == (_ref43(2026, 10, 5, 10, 0), "10-05 10:00（UTC+8）"),
+      A.next_checkin_window(_ref43(2026, 10, 5, 9, 59, 59)))
+check("窗口：恰好 10:00 -> 次日 10:00（不返回已到点时刻）",
+      A.next_checkin_window(_ref43(2026, 10, 5, 10, 0, 0))[0]
+      == _ref43(2026, 10, 6, 10, 0))
+check("窗口：10:00 后 -> 次日 10:00",
+      A.next_checkin_window(_ref43(2026, 10, 5, 23, 30))[0]
+      == _ref43(2026, 10, 6, 10, 0))
+check("窗口：跨月边界（10-31 -> 11-01）",
+      A.next_checkin_window(_ref43(2026, 10, 31, 12, 0))
+      == (_ref43(2026, 11, 1, 10, 0), "11-01 10:00（UTC+8）"))
+check("窗口：跨年边界（12-31 -> 01-01）",
+      A.next_checkin_window(_ref43(2026, 12, 31, 23, 0))
+      == (_ref43(2027, 1, 1, 10, 0), "01-01 10:00（UTC+8）"))
+check("窗口：固定 UTC+8 计算（源码不依赖系统本地时区）",
+      "datetime.datetime.fromtimestamp(ts, _UTC8)" in _ALL_SRC
+      and "CHECKIN_WINDOW_HOUR_UTC8 = 10" in _ALL_SRC
+      and "_UTC8 = datetime.timezone(datetime.timedelta(hours=8))" in _ALL_SRC)
+
+# 3b. campaign_checkin 两个出口都给出 next_available_*
+import inspect as _inspect43
+_src_cc43 = _inspect43.getsource(A.Account.campaign_checkin)
+check("campaign_checkin：成功出口带 next_available_at/note",
+      _src_cc43.count('"next_available_at": next_at,') == 2
+      and _src_cc43.count('"next_available_note": next_note}') == 2,
+      _src_cc43.count('"next_available_at": next_at,'))
+_src_rc43 = _inspect43.getsource(T.run_checkin)
+check("run_checkin：活动平台结论原样带出（message/claimed/next_*）",
+      '"message": camp.get("message")' in _src_rc43
+      and "qoder_accounts.campaign_label(c)" in _src_rc43
+      and '"next_available_note": camp.get("next_available_note")' in _src_rc43)
+_route43 = open(os.path.join(_ROOT, "qoder2api", "api", "accounts_routes.py"),
+                encoding="utf-8").read()
+check("/accounts/checkin 结果项透传 message/claimed/next_*（新增不替换）",
+      '"message": res.get("message")' in _route43
+      and '"claimed": res.get("claimed")' in _route43
+      and '"next_available_at": res.get("next_available_at")' in _route43
+      and '"msg": (res.get("logs") or [""])[-1]' in _route43)
+
+# 3c. 前端三态：只有真到账才是「成功」色
+_page43 = open(os.path.join(_ROOT, "web", "app", "(main)", "accounts",
+                            "page.tsx"), encoding="utf-8").read()
+check("账号页：按 claimed/earned 判「到账」，不再拿 ok 当成功",
+      "function checkinOutcome(" in _page43
+      and "const claimed = (Array.isArray(x.claimed) ? x.claimed : [])" in _page43
+      and "if (x.ok) notify.ok(" not in _page43)
+check("账号页：未到账走中性提示并附「下次可签到」",
+      "else notify.warn('本轮无可领', row.text)" in _page43
+      and "下次可签到 ${next}" in _page43
+      and "function fmtNextCheckin(" in _page43)
+
+
+print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

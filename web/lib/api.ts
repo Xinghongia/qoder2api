@@ -5,7 +5,10 @@
  *   · API Key：`?key=` 引导 → localStorage['wb-proxy-api-key']，请求带
  *     `Authorization: Bearer`；
  *   · 面板会话：`X-Panel-Token`，存 sessionStorage['wb-proxy-panel-token']；
- *   · 401/403 → 交给上层的面板登录弹窗（不整页跳转）。
+ *   · **401 = 会话无效 → 弹面板登录框（不整页跳转）；403 = 服务端有意的拒绝，
+ *     会话是好的 → 保留会话、把服务端的说明原样显示**（上游 v1.2.9）。
+ *     此前把 403 也当 401，导致「默认密码下读取明文 Key」这种正常拒绝反而
+ *     弹出登录框、还吞掉了服务端的原因说明。
  */
 
 export const KEY_STORE = 'wb-proxy-api-key';
@@ -28,7 +31,7 @@ let panelToken = '';
 
 const unauthorizedHandlers = new Set<() => void>();
 
-/** 订阅「需要面板登录」事件（401/403 时触发）。 */
+/** 订阅「需要面板登录」事件（仅 401 触发）。 */
 export function onUnauthorized(fn: () => void): () => void {
   unauthorizedHandlers.add(fn);
   return () => unauthorizedHandlers.delete(fn);
@@ -36,6 +39,29 @@ export function onUnauthorized(fn: () => void): () => void {
 
 function fireUnauthorized() {
   unauthorizedHandlers.forEach((fn) => fn());
+}
+
+/**
+ * 鉴权状态分流：只有 401（会话无效/缺失）才该弹登录框。
+ * 403 是服务端**有意的拒绝**（如「面板仍是默认密码，不交明文 Key」），
+ * 会话本身是好的——弹登录框只会让用户反复登录还看不到原因。
+ */
+function authStatusIs401(status: number): boolean {
+  if (status !== 401) return false;
+  fireUnauthorized();
+  return true;
+}
+
+/** 解析非 2xx 响应体里的服务端说明（读一次 body，绝不重复读）。 */
+function errorFromBody(status: number, text: string): ApiError {
+  let parsed: any = {};
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = {raw: text};
+  }
+  const msg = parsed?.error?.message || parsed?.message || `HTTP ${status}`;
+  return new ApiError(status, msg, parsed?.error?.detail || parsed?.detail || '');
 }
 
 /**
@@ -119,20 +145,15 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
   if (body !== undefined) init.body = JSON.stringify(body);
 
   const r = await fetch(path, init);
-  if (r.status === 401 || r.status === 403) {
-    fireUnauthorized();
-    throw new ApiError(r.status, '需要面板登录');
-  }
+  const needLogin = authStatusIs401(r.status);
   const text = await r.text();
+  if (needLogin) throw new ApiError(401, '需要面板登录');
+  if (!r.ok) throw errorFromBody(r.status, text);
   let parsed: any = {};
   try {
     parsed = text ? JSON.parse(text) : {};
   } catch {
     parsed = {raw: text};
-  }
-  if (!r.ok) {
-    const msg = parsed?.error?.message || parsed?.message || `HTTP ${r.status}`;
-    throw new ApiError(r.status, msg, parsed?.error?.detail || parsed?.detail || '');
   }
   return parsed as T;
 }
@@ -140,9 +161,9 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
 /**
  * GET 原始文本（不解析 JSON）。
  *
- * 账号导出等下载场景必须把服务端返回的字节原样落盘；鉴权头与 401/403 →
- * onUnauthorized 的语义和 request 完全一致，非 2xx 仍抛 ApiError（404 的
- * error.message 原样保留，交给调用方展示）。
+ * 账号导出等下载场景必须把服务端返回的字节原样落盘；鉴权语义与 request
+ * 一致（401 → 登录框；403 → 保留会话并把服务端说明原样抛出），非 2xx 仍抛
+ * ApiError（404 的 error.message 原样保留，交给调用方展示）。
  */
 async function getText(path: string): Promise<string> {
   const r = await fetch(path, {
@@ -150,21 +171,10 @@ async function getText(path: string): Promise<string> {
     cache: 'no-store',
     headers: authHeaders(),
   });
-  if (r.status === 401 || r.status === 403) {
-    fireUnauthorized();
-    throw new ApiError(r.status, '需要面板登录');
-  }
+  const needLogin = authStatusIs401(r.status);
   const text = await r.text();
-  if (!r.ok) {
-    let parsed: any = {};
-    try {
-      parsed = text ? JSON.parse(text) : {};
-    } catch {
-      parsed = {raw: text};
-    }
-    const msg = parsed?.error?.message || parsed?.message || `HTTP ${r.status}`;
-    throw new ApiError(r.status, msg, parsed?.error?.detail || parsed?.detail || '');
-  }
+  if (needLogin) throw new ApiError(401, '需要面板登录');
+  if (!r.ok) throw errorFromBody(r.status, text);
   return text;
 }
 

@@ -454,7 +454,10 @@ def recover_leaked_tool_calls(frames, allowed_names=None):
             hold += piece
             if _still_leak_candidate(hold):
                 if fin:
-                    finished = (payload, fin)
+                    # 该帧 content 已并入 hold（稍后补发或吞掉），收尾帧必须
+                    # 去掉 content，否则同一段内容会发两次（上游 issue #16
+                    # 顺带发现的既存缺陷：正文以 "[" 结尾时最易命中）。
+                    finished = (_frame_without_content(payload), fin)
                 elif (delta.get("tool_calls")
                       or delta.get("reasoning_content")
                       or delta.get("role")):
@@ -467,7 +470,8 @@ def recover_leaked_tool_calls(frames, allowed_names=None):
             yield _leak_chunk_frame(meta, {"content": hold})
             hold = None
             if fin:
-                finished = (payload, fin)
+                # 同上：本帧 content 已随 hold 补发过，收尾帧不得再带 content。
+                finished = (_frame_without_content(payload), fin)
             continue
         if fin and not piece:
             finished = (payload, fin)
@@ -475,7 +479,8 @@ def recover_leaked_tool_calls(frames, allowed_names=None):
         if piece and leak_prefix_hold(piece):
             hold = piece
             if fin:
-                finished = (payload, fin)
+                # 同上：content 已进 hold，收尾帧去掉 content 防重复。
+                finished = (_frame_without_content(payload), fin)
             continue
         if piece and fin:
             yield _leak_chunk_frame(meta, {"content": piece}, fin)

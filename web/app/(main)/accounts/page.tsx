@@ -176,25 +176,35 @@ export default function AccountsPage() {
       const results = r?.results || [];
       // 反馈口径照旧看板：逐个账号报「成功 / 失败原因」，不能只回一句
       // 「已提交」——失败（同人去重、上游拒绝、无接口）必须如实说出来。
+      // 且「成功」只用在**真到账**上：已领取 / 暂无可领 走中性提示，否则
+      // 一次正确地没发积分的签到会被读成"积分丢了"（上游 issue #20）。
       if (!results.length) {
         notify.warn(uid ? '未找到该账号' : '未发现可签到账号', '账号可能已停用或凭证缺失');
       } else if (uid || results.length === 1) {
-        const x = results[0];
-        const line = checkinLine(x);
-        if (x.ok) notify.ok('签到完成', line);
-        else notify.err('签到失败', line);
+        const row = checkinOutcome(results[0]);
+        if (row.state === 'claimed') notify.ok('签到完成', row.text);
+        else if (row.state === 'failed') notify.err('签到失败', row.text);
+        else notify.warn('本轮无可领', row.text);
       } else {
-        const lines = results.map(checkinLine).join('；');
-        const okCount = results.filter((x) => x.ok).length;
-        if (okCount === results.length) {
-          notify.ok(`每日签到：${okCount}/${results.length} 全部成功`, lines);
-        } else if (okCount > 0) {
+        const rows = results.map(checkinOutcome);
+        const claimed = rows.filter((x) => x.state === 'claimed');
+        const failed = rows.filter((x) => x.state === 'failed');
+        const lines =
+          rows.length <= 3
+            ? rows.map((x) => x.text).join('；')
+            : `${rows.map((x) => x.name).join('、')}；明细 ${rows[0].text}`;
+        if (claimed.length) {
+          notify.ok(
+            `每日签到：${claimed.length}/${rows.length} 到账`,
+            claimed.map((x) => x.text).join('；'),
+          );
+        } else if (failed.length === rows.length) {
+          notify.err('每日签到：全部失败', lines);
+        } else {
           notify.warn(
-            `每日签到：${okCount}/${results.length} 成功，${results.length - okCount} 个失败`,
+            `每日签到：${rows.length - failed.length}/${rows.length} 个没到账（已领取或暂无可领）`,
             lines,
           );
-        } else {
-          notify.err('每日签到：全部失败', lines);
         }
       }
       await loadList();
@@ -287,23 +297,72 @@ interface CreditsResult {
 interface CheckinResult {
   uid?: string;
   nickname?: string;
+  /** 只代表「这次请求没报错」；是否真到账要看 claimed / earned_credit */
   ok?: boolean;
   earned_credit?: number;
-  /** logs 的最后一行（往往是「当前额度余额」这类收尾行） */
+  /** logs 的最后一行（往往是「当前额度余额」这类收尾行，不是结论） */
   msg?: string;
   logs?: string[];
+  /** 活动平台结论文本（旧 sash 兜底路径没有这个字段） */
+  message?: string;
+  /** 本轮**真实新增**的活动名；空数组 = 没领到（已领取/暂无可领） */
+  claimed?: string[];
+  /** 下一个「每日 10:00（UTC+8）」窗口 */
+  next_available_at?: number;
+  next_available_note?: string;
 }
 
 /**
- * 一个账号的签到结果文案，与旧看板 checkinOne/doCheckin 同一口径：
- * 成功显示实际动作（领取/已领取），失败显示真实原因。
- * logs 里带 ✓/⚠/! 标记的那一行信息量最大，优先用它（去掉标记与 [账号名]）。
+ * 下次可签到时间：优先用后端格式化好的 UTC+8 note；缺失时按 epoch 秒兜底换算，
+ * 读数一律走 getUTC*，不受浏览器本地时区影响。
  */
-function checkinLine(x: CheckinResult): string {
+function fmtNextCheckin(x: CheckinResult): string {
+  if (x.next_available_note) return String(x.next_available_note);
+  const sec = Number(x.next_available_at || 0);
+  if (!sec) return '';
+  const d = new Date(sec * 1000 + 8 * 3600 * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}（UTC+8）`;
+}
+
+/**
+ * 签到结论：三态分开渲染，绝不把「已领取」「暂无可领」写成「签到成功」。
+ * 结论文案优先级：活动平台 message → 日志结论行 → 旧 msg（余额行不当结论）→ 兜底。
+ */
+function checkinOutcome(x: CheckinResult): {
+  state: 'claimed' | 'idle' | 'failed';
+  name: string;
+  text: string;
+} {
   const name = x.nickname || (x.uid || '').slice(0, 6) || '账号';
-  const marked = (x.logs || []).find((l) => /[✓⚠!]/.test(l));
-  let detail = (marked || x.msg || '').replace(/^[✓⚠!\-\s]*\[[^\]]*\]\s*/, '').trim();
-  if (!detail) detail = x.ok ? '签到成功' : '签到失败';
-  if (x.ok && x.earned_credit) detail = `+${x.earned_credit} Credits · ${detail}`;
-  return `${name}：${detail}`;
+  const marked = (x.logs || []).find((l) => /[✓⚠!—]/.test(l));
+  const fromLog = (marked || '')
+    .replace(/^[✓⚠!\-\s]*\[[^\]]*\]\s*/, '')
+    .trim();
+  const legacyMsg =
+    x.msg && !/当前额度余额/.test(String(x.msg)) ? String(x.msg).trim() : '';
+  const detail = x.message || fromLog || legacyMsg;
+  if (x.ok === false) {
+    return {state: 'failed', name, text: `${name}：${detail || '失败'}`};
+  }
+  const claimed = (Array.isArray(x.claimed) ? x.claimed : []).filter(
+    (v) => typeof v === 'string' && v,
+  );
+  const earned = Number(x.earned_credit || 0);
+  if (claimed.length || earned > 0) {
+    const text =
+      detail ||
+      `领取成功${earned > 0 ? ` +${earned} 积分` : ''}${
+        claimed.length ? `（${claimed.join('、')}）` : ''
+      }`;
+    return {state: 'claimed', name, text: `${name}：${text}`};
+  }
+  const next = fmtNextCheckin(x);
+  return {
+    state: 'idle',
+    name,
+    text:
+      `${name}：${detail || '本次没有新增积分（已领取或暂无可领取的活动）'}` +
+      (next ? `；下次可签到 ${next}` : ''),
+  };
 }

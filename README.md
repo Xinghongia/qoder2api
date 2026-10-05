@@ -1,7 +1,7 @@
 # Qoder2API
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2.12-2496ED?style=flat-square" alt="Version 1.2.12">
+  <img src="https://img.shields.io/badge/Release-v1.2.13-2496ED?style=flat-square" alt="Version 1.2.13">
   <img src="https://img.shields.io/badge/Python-3.9+-blue.svg?style=flat-square" alt="Python">
   <img src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square" alt="OpenAI API">
   <img src="https://img.shields.io/badge/Dual_Realm-CN_&_Intl-0DBD8B?style=flat-square" alt="Dual Realm">
@@ -143,7 +143,7 @@ export OPENAI_API_KEY="<控制台里绑定的 Key>"
 
 ```bash
 # 离线确定性测试（零网络）
-python tests/test_qoder.py      # 628 项断言：密码学 KAT、COSY 签名、目录全字段、
+python tests/test_qoder.py      # 654 项断言：密码学 KAT、COSY 签名、目录全字段、
                                 # 签到/活动归一化、泄漏回读、Responses、调度器…
 python tests/test_usagedb.py    # 用量统计 SQLite 聚合
 python tests/test_static.py     # 前端静态托管的安全与路由判定
@@ -189,6 +189,15 @@ qoder2api/
 ## 📜 版本与更新日志
 
 早期版本（v1.1.x）的完整说明见 [Releases](https://github.com/shuishuipingan/qoder2api-hub/releases)；以下是本仓库的近期变更。
+
+### v1.2.13
+
+**移植上游 v1.2.7 / v1.2.9 / v1.2.15 的三处修复（收尾帧重复吐字、403 误弹登录框、签到如实上报）**
+
+- **正文不再重复吐字**（上游 issue #16 顺带发现的既存缺陷）：回读守卫在暂存泄漏候选时，收尾帧会把同一个 chunk 原样重放一次——正文以 `[` 之类的标记前缀结尾时，最后一个字会**吐两遍**（`[x` → `[xx`）。现在收尾帧重放时去掉 content（内容已随暂存段补发/吞掉），并加了回归测试与静态护栏。
+- **403 不再弹面板登录框**（上游 v1.2.9）：此前 401 与 403 一起被当成"会话失效"，于是「面板仍是默认密码时读取明文 Key」这种**有意拒绝**反而弹出登录框、还把服务端的原因说明吞掉。现在只有 401 回登录框；403 保留会话并把服务端的话原样提示（实测：点「显示」得到"面板仍在使用默认密码…请先修改密码"的提示，会话不丢）。
+- **签到结果如实上报**（上游 issue #20）：`ok` 只代表"这次请求没报错"，不再当作"签到成功"——已领取 / 暂无可领 / 名额发完现在走中性提示，只有**真到账**才用成功色；后端透传活动平台结论（`message` / `claimed` / `next_available_at` / `next_available_note`），未到账时附「下次可签到 10-06 10:00（UTC+8）」（窗口按固定 UTC+8 计算，容器跑 UTC 也不会差 8 小时）。
+- 测试：654 PASS / 0 FAIL（新增 [43] 组 20 条，覆盖重复吐字回归、401/403 分流、轮次窗口边界含跨月/跨年）。
 
 ### v1.2.12
 

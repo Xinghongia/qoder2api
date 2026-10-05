@@ -396,11 +396,12 @@ export function GrowthTasksPanel({
         (r.logs || []).forEach((l) => chunks.push(l));
         reportRun(r);
       } catch (e) {
-        authFailed = e instanceof ApiError && (e.status === 401 || e.status === 403);
+        authFailed = e instanceof ApiError && e.status === 401;
         chunks.push(`! 活动全量领取失败：${errText(e)}`);
         notify.err('活动全量领取失败', errText(e));
       }
-      // 两个动作相互独立：run 失败时 travel 仍继续（401/403 除外，避免重复登录弹窗）
+      // 两个动作相互独立：run 失败时 travel 仍继续（401 会话已失效除外，
+      // 避免在同一轮里重复触发登录弹窗）
       if (!authFailed) {
         chunks.push('------ Pro 福利包（/tasks/travel） ------');
         try {

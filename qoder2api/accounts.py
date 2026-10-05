@@ -13,6 +13,7 @@
   - 账号导入导出（Dry-Run 预检）与 JSON 持久化（原子写）
 """
 import base64
+import datetime
 import ipaddress
 import json
 import os
@@ -660,6 +661,29 @@ def current_round_start(ts=None):
     if base < start:
         start -= 86400
     return start
+
+
+# 签到窗口（下一个每日 10:00）固定按 UTC+8 计算与呈现：官方规则是 UTC+8 的
+# 10:00 刷新，容器里常是 UTC，若按系统本地时区渲染，用户看到的"下次"会和
+# 官方说明差 8 小时。
+CHECKIN_WINDOW_HOUR_UTC8 = 10
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def next_checkin_window(now=None):
+    """下一个「每日 10:00（UTC+8）」窗口 → (epoch 秒:int, 人类可读:str)。
+
+    边界：今天 10:00 之前 → 今天 10:00；到达/晚于 10:00（含刚领完）→ 明天
+    10:00（取"到达即算下一轮"，不返回一个已经到点的时刻）。note 形如
+    "10-05 10:00（UTC+8）"；两个返回值同源，调用方调一次即可拿到成对字段。
+    """
+    ts = time.time() if now is None else float(now)
+    now8 = datetime.datetime.fromtimestamp(ts, _UTC8)
+    boundary = now8.replace(hour=CHECKIN_WINDOW_HOUR_UTC8, minute=0,
+                            second=0, microsecond=0)
+    if now8 >= boundary:
+        boundary += datetime.timedelta(days=1)
+    return int(boundary.timestamp()), boundary.strftime("%m-%d %H:%M") + "（UTC+8）"
 
 
 def _last_checkin_ts(value):
@@ -1485,19 +1509,26 @@ class Account(object):
         gap: 相邻两次 claim 请求之间的间隔（秒）；None=使用模块级安全默认
              CLAIM_GAP_DEFAULT（>=1.0s），显式传入时按传入值（下限 0）。
 
-        返回 {ok, claimed:[...], already:[...], earned, message, campaigns}
+        返回 {ok, claimed:[...], already:[...], earned, message, campaigns,
+              next_available_at, next_available_note}
           - 已是 CLAIMED 的活动计入 already（"本轮已领取"）
           - 名额发完/成就未完成单独分类（pending/locked），不算领取失败
           - 无可领取项且没有任何活动 -> ok=True + message 说明
+          - next_available_at / next_available_note：下一个「每日 10:00（UTC+8）」
+            的 epoch 秒与可读文本（见 next_checkin_window）；**无论本次是否真的
+            领到都给出**，由前端按需渲染（后端不替前端判断要不要显示）。
         """
         claim_gap = CLAIM_GAP_DEFAULT if gap is None else max(0.0, float(gap))
         native_machine_identity(self.realm, self.uid, force=True)
         st = self.campaigns(force=True)      # 领取路径必须绕过缓存，看最新状态
         if not st.get("ok"):
+            next_at, next_note = next_checkin_window()
             return {"ok": False, "error": st.get("error") or "campaigns 查询失败",
                     "earned": 0, "claimed": [], "already": [], "blocked": [],
                     "pending": [], "locked": [], "codes": [], "views": [],
-                    "errors": []}
+                    "errors": [],
+                    "next_available_at": next_at,
+                    "next_available_note": next_note}
         claimed, already, earned, errors, blocked = [], [], 0, [], []
         pending, locked, codes, views = [], [], [], []   # 券/成就/详情类
         for c in st["campaigns"]:
@@ -1624,11 +1655,16 @@ class Account(object):
             msg += extra
         # 领取动作会改变活动状态：让下一次列表查询重新拉取（不吃 20s 缓存）
         self._campaigns_cache = None
+        # 「下次可签到时间」无条件给出（真领取 / 已领 / 被挡 / 名额发完 / 任务未完成 /
+        # 无可领项 全部走这一个出口）：是否渲染由前端按需决定。
+        next_at, next_note = next_checkin_window()
         return {"ok": not errors, "claimed": claimed, "already": already,
                 "blocked": blocked, "earned": earned, "message": msg,
                 "pending": pending, "locked": locked, "codes": codes,
                 "views": views,
-                "campaigns": st["campaigns"], "errors": errors}
+                "campaigns": st["campaigns"], "errors": errors,
+                "next_available_at": next_at,
+                "next_available_note": next_note}
 
     def _campaign_checkin_result(self):
         """旧签到接口不可用/停用时改走活动平台（checkin() 的兜底分支）。
@@ -1779,7 +1815,6 @@ def _device_expiry(data):
         return int(time.time() + int(data["expires_in"]) / 1000)
     if data.get("expires_at"):
         try:
-            import datetime
             dt = datetime.datetime.strptime(str(data["expires_at"])[:19],
                                              "%Y-%m-%dT%H:%M:%S")
             return int(dt.timestamp())
@@ -2422,7 +2457,6 @@ def scan_desktop_credentials():
             if not exp and data.get("token"):
                 # expiresAt 是 RFC3339 -> normalize_epoch 处理不了，单独解析
                 try:
-                    import datetime
                     exp = int(datetime.datetime.strptime(
                         str(data["expiresAt"])[:19], "%Y-%m-%dT%H:%M:%S"
                     ).timestamp())
@@ -2531,7 +2565,6 @@ def import_desktop_credential(path=None, realm=None):
         uid = str(user.get("id") or "")
         nickname = str(user.get("name") or "")
         try:
-            import datetime
             exp = int(datetime.datetime.strptime(
                 str(data.get("expiresAt") or "")[:19], "%Y-%m-%dT%H:%M:%S"
             ).timestamp())
